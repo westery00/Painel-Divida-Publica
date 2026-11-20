@@ -17,7 +17,7 @@ class Indicador(ABC):
 
 class IndicadorMonetario(Indicador):
     def formatar_valor(self):
-        return f"R$ {self.get_valor():,.2f}".replace('.', ',')
+        return f"R$ {self.get_valor():,.2f}"
 
 class IndicadorPercentual(Indicador):
     def formatar_valor(self):
