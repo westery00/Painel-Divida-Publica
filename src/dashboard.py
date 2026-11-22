@@ -38,11 +38,11 @@ class Dashboard:
         with col1:
             st.metric(label="Total de Registros", value=len(df_filtrado))
         with col2:
-            st.metric(label="Média Geral", value="R$ 5.20 Tri") # Exemplo adaptável
+            st.metric(label="Média Geral", value=df_filtrado.iloc[:, 1].mean()) # Exemplo adaptável
         with col3:
-            st.metric(label="Maior Pico", value="R$ 7.10 Tri")
+            st.metric(label="Maior Pico", value=df_filtrado.iloc[:, 1].max()) # Exemplo adaptável
         with col4:
-            st.metric(label="Variação Anual", value="+4.15%")
+            st.metric(label="Variação Anual", value=df_filtrado.iloc[:, 1].pct_change().mean() * 100) # Exemplo adaptável
             
         st.markdown("---")
 
