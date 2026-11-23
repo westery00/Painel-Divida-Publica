@@ -1,46 +1,68 @@
 import pandas as pd
-import os
+from pathlib import Path
+import logging
+from config import PASTA_DADOS, SERIES
+
+log = logging.getLogger(__name__)
 class FonteDados:
-    def __init__(self, nome_arquivo, caminho):
-        self.nome_arquivo = nome_arquivo
-        self.__caminho = caminho
+    COLUNAS = ["data", "valor", "categoria", "tipo"]
+    FORMATO_DATA = "%d/%m/%Y"
 
-    def get_caminho(self):
-        return self.__caminho
+    def __init__(self, pasta_dados=PASTA_DADOS):
+        self.__pasta_dados = Path(pasta_dados)
 
-    def carregar_dados(self):
-            try:
-                self.df = pd.read_csv(self.__caminho, sep=';', decimal=',')
-                return self.df
-            except FileNotFoundError:
-                print(f"Erro: O arquivo '{self.nome_arquivo}' não foi encontrado.")
-                return pd.DataFrame()
-            except Exception as e:
-                print(f"Erro ao carregar os dados do arquivo '{self.nome_arquivo}': {e}")
-                return pd.DataFrame()
+    def get_pasta_dados(self):
+        return self.__pasta_dados
 
-    def juntar_multiplos_csv(self, pasta, arquivo_saida="dados_juntados.csv"):
-        caminho=os.path.join(pasta)
-        arquivos_csv = [f for f in os.listdir(caminho) if f.endswith('.csv')]
-        if not arquivos_csv:
-            print(f"Nenhum arquivo CSV encontrado na pasta '{pasta}'.")
-            return pd.DataFrame()
+    def carregar_arquivo(self, caminho):
+        caminho = Path(caminho)
+        try:
+            df = pd.read_csv(caminho, sep=";", decimal=",", encoding="utf-8")
+            df["data"] = pd.to_datetime(df["data"], format=self.FORMATO_DATA)
+            df["valor"] = pd.to_numeric(df["valor"])
+            return df[["data", "valor"]]
+        except FileNotFoundError:
+            log.error("O arquivo '%s' não foi encontrado.", caminho)
+        except (OSError, ValueError, KeyError) as erro:
+            log.error("Erro ao carregar '%s': %r", caminho.name, erro)
+        return pd.DataFrame(columns=["data", "valor"])
 
-        df_list = []
-        for arquivo in arquivos_csv:
-            caminho_arquivo = os.path.join(caminho, arquivo)
-            try:
-                df_temp = pd.read_csv(caminho_arquivo, sep=';', decimal=',')
-                df_list.append(df_temp["valor"])
-            except Exception as e:
-                    print(f"Erro ao ler o arquivo '{arquivo}': {e}")
+    def carregar_tipo(self, tipo):
+        series = SERIES.get(tipo)
+        if series is None:
+            log.error("Tipo desconhecido: '%s'. Use um de %s.", tipo, list(SERIES))
+            return self._vazio()
 
-        if df_list:
-            df_juntado = pd.concat(df_list, ignore_index=True)
-            caminho_saida = os.path.join(pasta, arquivo_saida)
-            df_juntado.to_csv(caminho_saida, index=False, sep=';', decimal=',')
-            print(f"Arquivos CSV juntados com sucesso em '{caminho_saida}'.")
-            return df_juntado
-        else:
-            print("Nenhum dado foi carregado para juntar.")
-            return pd.DataFrame()
+        pasta = self.__pasta_dados / tipo
+        if not pasta.is_dir():
+            log.error("Pasta '%s' não encontrada.", pasta)
+            return self._vazio()
+
+        partes = []
+        for nome_arquivo, serie in series.items():
+            df = self.carregar_arquivo(pasta / nome_arquivo)
+            if df.empty:
+                continue  # o motivo já foi registrado em carregar_arquivo
+            df["categoria"] = serie.categoria
+            df["tipo"] = tipo
+            partes.append(df)
+
+        ignorados = sorted({f.name for f in pasta.glob("*.csv")} - set(series))
+        if ignorados:
+            log.warning("Arquivos CSV ignorados em '%s' (não estão em config.SERIES): %s",
+                        pasta, ignorados)
+
+        if not partes:
+            log.warning("Nenhum dado carregado para o tipo '%s'.", tipo)
+            return self._vazio()
+        return pd.concat(partes, ignore_index=True)[self.COLUNAS]        
+
+    def carregar_tudo(self):
+        partes = [self.carregar_tipo(tipo) for tipo in SERIES]
+        partes = [p for p in partes if not p.empty]
+        if not partes:
+            return self._vazio()
+        return pd.concat(partes, ignore_index=True)
+
+    def _vazio(self):
+        return pd.DataFrame(columns=self.COLUNAS)

@@ -1,25 +1,15 @@
-import os
-from fonte_dados import FonteDados
-from analisador_dados import analisador_dados
-from visualizador import Visualizador
+from analisador_dados import AnalisadorDados
 from dashboard import Dashboard
+from fonte_dados import FonteDados
+from visualizador import Visualizador
 
 def main():
-    # 1. Gerenciar origem dos dados (FonteDados)
-    caminho_arquivo = os.path.join("dados", "divida_liquida_geral.csv")
-    fonte = FonteDados("divida_liquida_geral.csv", caminho_arquivo)
-    df_bruto = fonte.juntar_multiplos_csv("dados/porcentagem", "dados_juntados.csv")
+    Dashboard.configurar_pagina()
 
-    # 2. Processar e analisar (AnalisadorDados)
-    analisador = analisador_dados(df_bruto)
-    df_tratado = analisador.get_df_limpo()
-
-    # 3. Gerar visualizações (Visualizador)
+    df_bruto = FonteDados().carregar_tudo()
+    analisador = AnalisadorDados(df_bruto)
     visualizador = Visualizador()
-
-    # 4. Organizar o painel e iniciar o Dashboard (Dashboard)
-    app = Dashboard(df_tratado, visualizador, analisador)
-    app.executar()
+    Dashboard(analisador, visualizador).executar()
 
 if __name__ == "__main__":
     main()
