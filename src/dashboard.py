@@ -3,6 +3,16 @@
 O Dashboard só apresenta: pede os números e textos à AnaliseDivida, os gráficos
 ao Visualizador, o visual ao módulo ``tema`` e a formatação aos ``formatar_*``.
 
+DADO EM FOCO. O usuário escolhe na barra lateral:
+    Geral  -> usa todos os dados (o consolidado e todos os setores);
+    setor  -> mostra só uma parte dos dados: todos os indicadores, textos e gráficos
+              passam a falar desse setor, que aparece em destaque (os demais ficam apagados).
+
+Cada gráfico é montado por um método ``_c_*`` que devolve um ``Cartao`` pronto, ou
+``None`` quando o gráfico não faz sentido para o dado em foco (ex.: crescimento
+percentual do Banco Central, cuja dívida é negativa). Cartões ``None`` somem da tela e
+os vizinhos ocupam o espaço (veja ``_linha``).
+
 Abas (cada uma responde a uma pergunta do projeto):
     Visão geral          -> resumo das três respostas e evolução no tempo
     De onde vem          -> composição da dívida por setor (origem)
@@ -17,12 +27,20 @@ import streamlit as st
 
 import tema
 from analise_divida import COLUNAS, TOTAL, AnaliseDivida, Janela
-from config import (COMPONENTES, EVENTOS, ROTULOS_CURTOS, ROTULOS_TIPO, TIPO_PORCENTAGEM, UNIDADES)
+from config import (COMPONENTES, ESTATAIS_DETALHE, EVENTOS, FOCOS, GERAL, ROTULOS_CURTOS,
+                    ROTULOS_TIPO, TIPO_PORCENTAGEM, UNIDADES, serie_do_foco)
 from indicador import (criar_indicador, formatar_medida, formatar_mes, formatar_numero,
                        formatar_percentual, formatar_pp, formatar_variacao)
 from visualizador import Visualizador
 
 METODOLOGIA = """
+**Fonte dos dados.** Banco Central do Brasil (Portal de Dados Abertos, dadosabertos.bcb.gov.br).
+
+**Dado em foco.** *Geral* usa todos os dados: o consolidado e todos os setores. Cada setor escolhido mostra
+apenas uma parte dos dados, e todo o painel passa a falar dele: os indicadores, os textos e os gráficos,
+nos quais o setor aparece em destaque e os demais ficam apagados. Gráficos que não fazem sentido para o setor
+escolhido são escondidos (por exemplo, o crescimento percentual da dívida do Banco Central, que é negativa).
+
 **O que é a dívida líquida.** É o saldo das dívidas das entidades públicas menos os seus ativos
 financeiros (créditos). Como os ativos são descontados, o valor pode ser **negativo**: é o que
 acontece com o Banco Central em boa parte do período (posição credora líquida).
@@ -46,12 +64,14 @@ cerca de R$ 5,78 tri em dez/2014 e R$ 7,39 tri em dez/2019), o que confirma as u
 
 **Crescimento médio anual (CAGR).** É a taxa anual constante que levaria do valor inicial ao final:
 `(final ÷ inicial) ^ (12 ÷ meses) − 1`. Compara-se o ritmo da dívida com o do PIB nominal: quando a dívida
-cresce mais rápido que o PIB, a razão dívida/PIB sobe. Só é calculado para períodos de 12 meses ou mais.
+cresce mais rápido que o PIB, a razão dívida/PIB sobe. Só é calculado para períodos de 12 meses ou mais e
+para séries positivas.
 
 **Como ler os gráficos.**
 **Cascata:** cada barra soma (ou subtrai) à anterior até chegar ao total. **Mapa de calor:** cada célula é a
-variação de um fim de ano ao seguinte; vermelho = a dívida subiu, verde = caiu. **Faixas sombreadas:**
-eventos de contexto (não fazem parte dos CSVs). **\\***: ano em andamento, com o dado mais recente.
+variação de um fim de ano ao seguinte; vermelho = a dívida subiu, verde = caiu; o contorno branco marca o
+dado em foco. **Faixas sombreadas:** eventos de contexto (não fazem parte dos dados). **\\***: ano em
+andamento, com o dado mais recente.
 
 **Limitações.** O painel usa só a *dívida líquida* por setor. Ele mostra *quem* deve e *quanto cresceu*,
 mas não decompõe o crescimento por fluxos (resultado primário, juros, câmbio), não separa dívida interna e
@@ -71,6 +91,32 @@ class Selecao:
     @property
     def unidade(self):
         return UNIDADES[self.tipo]
+
+    @property
+    def serie(self) -> str:
+        """Série usada nos indicadores: o total (se Geral) ou o próprio setor."""
+        return serie_do_foco(self.foco)
+
+    @property
+    def em_foco(self) -> bool:
+        return self.foco != GERAL
+
+    def destacada(self, categoria: str) -> bool:
+        """Esta categoria está em destaque? No Geral, todas; num setor, só ele (e suas subdivisões)."""
+        if not self.em_foco:
+            return True
+        return categoria == self.foco or (self.foco == "Empresas Estatais" and categoria in ESTATAIS_DETALHE)
+
+
+@dataclass
+class Cartao:
+    """Um gráfico já pronto, com seu título, para ser desenhado dentro de um cartão."""
+    nome: str
+    titulo: str
+    subtitulo: str
+    fig: object
+    nota: str = ""
+    legenda: str = ""
 
 
 class Dashboard:
@@ -110,12 +156,41 @@ class Dashboard:
         """Dívida subindo é vermelho; descendo, verde."""
         return tema.VERMELHO if valor > 0 else tema.VERDE
 
+    @staticmethod
+    def _cor(sel: Selecao, categoria: str) -> str:
+        """Cor da categoria; apagada se não for o dado em foco."""
+        cor = tema.CORES_CATEGORIA[categoria]
+        return cor if sel.destacada(categoria) else tema.esmaecer(cor)
+
+    def _linha(self, cartoes: list, larguras: list | None = None):
+        """Desenha uma linha de cartões, ignorando os None (gráficos que não se aplicam).
+
+        Se sobrar só um, ele ocupa a largura toda; as proporções só valem quando todos aparecem.
+        """
+        cartoes = [c for c in cartoes if c is not None]
+        if not cartoes:
+            return
+        proporcao = larguras if larguras and len(larguras) == len(cartoes) else len(cartoes)
+        for coluna, c in zip(st.columns(proporcao), cartoes):
+            with coluna, self._cartao(c.nome):
+                self._titulo(c.titulo, c.subtitulo)
+                self._grafico(c.fig, c.nome)
+                if c.legenda:
+                    st.markdown(c.legenda, unsafe_allow_html=True)
+                if c.nota:
+                    st.caption(c.nota)
+
+    @staticmethod
+    def _complemento(sel: Selecao) -> str:
+        return f" · em destaque: {sel.foco}" if sel.em_foco else ""
+
     # =============================================================== cabeçalho
-    def render_cabecalho(self, ultima_data=None):
+    def render_cabecalho(self, ultima_data=None, foco=None):
         atualizado = f"Dados até {formatar_mes(ultima_data)}" if ultima_data is not None else ""
         st.markdown(tema.html_cabecalho(
             "📊 Painel da Dívida Pública Líquida",
-            "De onde vem, quem mais contribui e por que aumentou", atualizado), unsafe_allow_html=True)
+            "De onde vem, quem mais contribui e por que aumentou", atualizado, foco or ""),
+            unsafe_allow_html=True)
 
     # ================================================================== filtros
     def filtros(self):
@@ -129,7 +204,10 @@ class Dashboard:
         else:
             ano_ini, ano_fim = st.sidebar.slider("Período (anos)", primeiro, ultimo, (primeiro, ultimo))
 
-        foco = st.sidebar.selectbox("Categoria em foco (indicadores do topo)", COLUNAS)
+        foco = st.sidebar.selectbox(
+            "Dado em foco", FOCOS,
+            help="Geral usa todos os dados. Cada setor mostra só uma parte, e todo o painel passa a "
+                 "falar dele.")
 
         janela = self.analise.janela(tipo, ano_ini, ano_fim)
         if janela is None:
@@ -141,9 +219,9 @@ class Dashboard:
 
     # ===================================================================== KPIs
     def render_kpis(self, sel: Selecao):
-        """Quatro indicadores da categoria em foco (todos refletem só essa série)."""
+        """Quatro indicadores do dado em foco (todos refletem só essa série)."""
         t, j = sel.tipo, sel.janela
-        k = self.analise.kpis_foco(t, sel.foco, j)
+        k = self.analise.kpis_foco(t, sel.serie, j)
         pequeno = len(sel.foco) > 18
 
         if k["delta_12m"] is None:
@@ -173,12 +251,144 @@ class Dashboard:
             coluna.markdown(html, unsafe_allow_html=True)
         st.write("")
 
+    # ============================================== cartões: de onde vem (Q1)
+    def _c_cascata_composicao(self, sel: Selecao):
+        t, j, u = sel.tipo, sel.janela, sel.unidade
+        c = self.analise.cascata_composicao(t, j)
+        textos = [formatar_medida(t, v, sinal=(m == "relative")) for v, m in zip(c["exibir"], c["medida"])]
+        cores = [tema.LARANJA if m == "total" else self._cor(sel, cat)
+                 for cat, m in zip(c["categoria"], c["medida"])]
+        fig = self.visualizador.cascata(c["rotulo"], c["valor"] * u.fator_nivel, c["medida"], textos,
+                                        cores, u.rotulo_nivel)
+        return Cartao("cascata_composicao", f"Como a dívida se forma · {formatar_mes(j.d1)}",
+                      "Cada setor soma (ou subtrai) até o total consolidado" + self._complemento(sel), fig)
+
+    def _c_rosca(self, sel: Selecao):
+        """Divisão do grupo do dado em foco; None para o Banco Central (não pertence a um grupo)."""
+        t, j, u = sel.tipo, sel.janela, sel.unidade
+        info = self.analise.divisao_grupo(t, j, sel.foco)
+        if info is None:
+            return self._c_estatais_esfera(sel) if sel.foco == "Empresas Estatais" else None
+
+        df, destaque = info["df"], info["destaque"]
+        cores = [tema.CORES_CATEGORIA[c] if destaque in (None, c) else tema.esmaecer(tema.CORES_CATEGORIA[c])
+                 for c in df["categoria"]]
+        rotulos = [ROTULOS_CURTOS[c] for c in df["categoria"]]
+        fig = self.visualizador.rosca(
+            rotulos, df["valor"], cores,
+            texto_central=f"{info['curto']}<br><b>{formatar_medida(t, info['soma'])}</b>",
+            destacar=ROTULOS_CURTOS[destaque] if destaque else None)
+        return Cartao("rosca_grupo", info["titulo"],
+                      f"Federal, estados e municípios · {formatar_mes(j.d1)}" + self._complemento(sel), fig,
+                      legenda=tema.html_legenda(list(zip(rotulos, cores))))
+
+    def _c_estatais_esfera(self, sel: Selecao):
+        """Empresas estatais por esfera, em barras (aceitam valores negativos, ao contrário da rosca)."""
+        t, j, u = sel.tipo, sel.janela, sel.unidade
+        rk = self.analise.ranking(t, j, detalhar_estatais=True)
+        rk = rk[rk["categoria"].isin(ESTATAIS_DETALHE)]
+        fig = self.visualizador.barras_horizontais(
+            [ROTULOS_CURTOS[c] for c in rk["categoria"]], rk["valor"] * u.fator_nivel,
+            [tema.CORES_CATEGORIA[c] for c in rk["categoria"]],
+            [formatar_medida(t, v) for v in rk["valor"]], u.rotulo_nivel, altura=300)
+        return Cartao("estatais_esfera", "Dentro das empresas estatais",
+                      f"Por esfera · {formatar_mes(j.d1)} · valor negativo: posição credora líquida", fig)
+
+    def _c_composicao_anual(self, sel: Selecao):
+        t, u = sel.tipo, sel.unidade
+        anual, nota = self.analise.composicao_anual(t, sel.ano_ini, sel.ano_fim)
+        partes = anual[COMPONENTES] * u.fator_nivel
+        partes.columns = [ROTULOS_CURTOS[c] for c in COMPONENTES]
+        cores = {ROTULOS_CURTOS[c]: self._cor(sel, c) for c in COMPONENTES}
+        fig = self.visualizador.barras_empilhadas(partes, cores, linha=anual[TOTAL] * u.fator_nivel,
+                                                  rotulo_y=u.rotulo_nivel)
+        legenda = "Barras abaixo de zero: setor com posição credora líquida (reduz o total)."
+        return Cartao("composicao_anual", "Composição ao longo dos anos",
+                      "Saldo de cada setor no fim de cada ano; a linha é o total" + self._complemento(sel),
+                      fig, nota=f"{legenda} {nota}" if nota else legenda)
+
+    # ============================================ cartões: qual setor contribui (Q2)
+    def _c_ranking(self, sel: Selecao, detalhar: bool):
+        t, j, u = sel.tipo, sel.janela, sel.unidade
+        rk = self.analise.ranking(t, j, detalhar)
+        fig = self.visualizador.barras_horizontais(
+            [ROTULOS_CURTOS[c] for c in rk["categoria"]], rk["valor"] * u.fator_nivel,
+            [self._cor(sel, c) for c in rk["categoria"]],
+            [formatar_percentual(p, 1) for p in rk["participacao"]], u.rotulo_nivel)
+        return Cartao("ranking", f"Ranking de contribuição · {formatar_mes(j.d1)}",
+                      f"Barras em {u.rotulo_nivel}; rótulos mostram a participação no total", fig)
+
+    def _c_participacao(self, sel: Selecao):
+        df = self.analise.participacoes(sel.tipo, sel.ano_ini, sel.ano_fim)
+        fig = self.visualizador.plotar_grafico(
+            df, "data", "valor", None, "linha", cor="categoria", rotulo_y="% do total",
+            cores=tema.CORES_CATEGORIA, bandas=EVENTOS, altura=400,
+            destaque=sel.foco if sel.em_foco else None)
+        return Cartao("participacao_tempo", "Participação no total ao longo do tempo",
+                      "Quanto cada setor representa da dívida consolidada, mês a mês" + self._complemento(sel), fig)
+
+    # ================================================ cartões: por que aumentou (Q3)
+    def _c_cascata_aumento(self, sel: Selecao):
+        t, j, u = sel.tipo, sel.janela, sel.unidade
+        c = self.analise.cascata_aumento(t, j)
+        textos = [formatar_variacao(t, v) if m == "relative" else formatar_medida(t, v)
+                  for v, m in zip(c["exibir"], c["medida"])]
+        cores = []
+        for categoria, medida, valor in zip(c["categoria"], c["medida"], c["exibir"]):
+            if medida != "relative":
+                cores.append(tema.LARANJA)
+                continue
+            base = tema.VERMELHO if valor > 0 else tema.VERDE
+            cores.append(base if sel.destacada(categoria) else tema.esmaecer(base))
+        fig = self.visualizador.cascata(c["rotulo"], c["valor"] * u.fator_nivel, c["medida"], textos,
+                                        cores, u.rotulo_nivel)
+        return Cartao("cascata_aumento", "Quem puxou a variação",
+                      f"Contribuição de cada setor · {j.texto}" + self._complemento(sel), fig)
+
+    def _c_crescimento(self, sel: Selecao):
+        """Crescimento em 12 meses do dado em foco x PIB; None se não for calculável."""
+        df = self.analise.crescimento_12m(sel.ano_ini, sel.ano_fim, sel.serie)
+        if df is None or df.empty:
+            return None
+        cores = {"Dívida líquida (R$)": tema.VERMELHO, "PIB nominal": tema.CIANO,
+                 "Dívida total (R$)": tema.esmaecer(tema.BRANCO, 0.6)}
+        if sel.em_foco:
+            cores[f"{sel.foco} (R$)"] = tema.CORES_CATEGORIA[sel.foco]
+        fig = self.visualizador.plotar_grafico(
+            df, "data", "valor", None, "linha", cor="serie", rotulo_y="% em 12 meses",
+            cores=cores, bandas=EVENTOS, altura=370)
+        quem = sel.foco if sel.em_foco else "Dívida"
+        return Cartao("crescimento_12m", f"{quem} x PIB: crescimento em 12 meses",
+                      "Quando a dívida cresce mais que o PIB, a razão dívida/PIB sobe", fig)
+
+    def _c_variacao_12m(self, sel: Selecao):
+        u = sel.unidade
+        serie = self.analise.variacao_12m(sel.tipo, sel.ano_ini, sel.ano_fim, sel.serie)
+        if serie.empty:
+            return None
+        fig = self.visualizador.barras_sinal(serie.index, serie.values * u.fator_delta, u.rotulo_delta)
+        titulo = f"Variação em 12 meses · {sel.foco}" if sel.em_foco else "Variação em 12 meses da dívida total"
+        return Cartao("variacao_12m", titulo, "Vermelho: alta · Verde: queda", fig)
+
+    def _c_mapa_calor(self, sel: Selecao):
+        t, u = sel.tipo, sel.unidade
+        matriz = self.analise.variacao_anual(t, sel.ano_ini, sel.ano_fim) * u.fator_delta
+        if matriz.empty:
+            return None
+        casas = 1 if t == TIPO_PORCENTAGEM else 0
+        textos = pd.DataFrame([[formatar_numero(v, casas, sinal=True) for v in linha] for linha in matriz.values],
+                              index=matriz.index, columns=matriz.columns)
+        fig = self.visualizador.mapa_calor(matriz, textos, u.rotulo_delta, destaque=ROTULOS_CURTOS[sel.serie])
+        return Cartao("mapa_calor", "Variação anual por setor",
+                      f"Fim de ano contra fim de ano ({u.rotulo_delta}) · contorno branco: {ROTULOS_CURTOS[sel.serie]}"
+                      if sel.em_foco else f"Fim de ano contra fim de ano ({u.rotulo_delta})", fig)
+
     # ===================================================================== abas
     def aba_visao_geral(self, sel: Selecao):
         t, j, u = sel.tipo, sel.janela, sel.unidade
-        respostas = self.analise.respostas(t, j)
-        cores = [tema.AZUL, tema.LARANJA, self._cor_variacao(
-            self.analise.kpis_foco(t, TOTAL, j)["variacao"])]
+        respostas = self.analise.respostas(t, j, sel.foco)
+        variacao = self.analise.kpis_foco(t, sel.serie, j)["variacao"]
+        cores = [tema.AZUL, tema.LARANJA, self._cor_variacao(variacao)]
         for coluna, r, cor in zip(st.columns(3), respostas, cores):
             coluna.markdown(tema.html_resposta(r["pergunta"], r["destaque"], r["texto"], cor),
                             unsafe_allow_html=True)
@@ -186,9 +396,10 @@ class Dashboard:
 
         with self._cartao("evolucao"):
             self._titulo("Evolução da dívida líquida", "Escolha as categorias para comparar")
-            padrao = [TOTAL] + COMPONENTES
-            categorias = st.multiselect("Categorias", COLUNAS, default=padrao, key="evo_categorias",
-                                        label_visibility="collapsed")
+            padrao = [TOTAL] + COMPONENTES if not sel.em_foco else [sel.foco, TOTAL]
+            # a key inclui o foco: ao trocar o dado em foco, a seleção volta ao padrão daquele foco
+            categorias = st.multiselect("Categorias", COLUNAS, default=padrao,
+                                        key=f"evo_categorias_{sel.foco}", label_visibility="collapsed")
             if not categorias:
                 st.info("Selecione ao menos uma categoria.")
             else:
@@ -196,165 +407,115 @@ class Dashboard:
                 df["valor"] = df["valor"] * u.fator_nivel
                 fig = self.visualizador.plotar_grafico(
                     df, "data", "valor", None, "linha", cor="categoria", rotulo_y=u.rotulo_nivel,
-                    cores=tema.CORES_CATEGORIA, bandas=EVENTOS, altura=420)
+                    cores=tema.CORES_CATEGORIA, bandas=EVENTOS, altura=420,
+                    destaque=sel.foco if sel.em_foco and sel.foco in categorias else None)
                 self._grafico(fig, "evolucao")
             st.caption("Faixas sombreadas: eventos de contexto (não fazem parte dos dados).")
 
         with self._cartao("conclusoes"):
-            self._titulo("Outras constatações do período")
-            self._texto("\n".join(f"- {c}" for c in self.analise.conclusoes(t, j)))
+            self._titulo("Outras constatações do período", f"Sobre: {sel.foco}")
+            self._texto("\n".join(f"- {c}" for c in self.analise.conclusoes(t, j, sel.foco)))
 
     def aba_origem(self, sel: Selecao):
-        t, j, u = sel.tipo, sel.janela, sel.unidade
-        esquerda, direita = st.columns([3, 2])
-
-        with esquerda, self._cartao("cascata_composicao"):
-            self._titulo(f"Como a dívida se forma · {formatar_mes(j.d1)}",
-                         "Cada setor soma (ou subtrai) até o total consolidado")
-            c = self.analise.cascata_composicao(t, j)
-            textos = [formatar_medida(t, v, sinal=(m == "relative")) for v, m in zip(c["exibir"], c["medida"])]
-            fig = self.visualizador.cascata(c["rotulo"], c["valor"] * u.fator_nivel, c["medida"],
-                                            textos, u.rotulo_nivel)
-            self._grafico(fig, "cascata_composicao")
-
-        with direita, self._cartao("rosca_governo"):
-            self._titulo("Dentro do governo geral", f"Federal, estados e municípios · {formatar_mes(j.d1)}")
-            df, soma = self.analise.divisao_governo_geral(t, j)
-            fig = self.visualizador.rosca(
-                [ROTULOS_CURTOS[c] for c in df["categoria"]], df["valor"],
-                [tema.CORES_CATEGORIA[c] for c in df["categoria"]],
-                texto_central=f"Governo geral<br><b>{formatar_medida(t, soma)}</b>")
-            self._grafico(fig, "rosca_governo")
-
-        with self._cartao("composicao_anual"):
-            self._titulo("Composição ao longo dos anos", "Saldo de cada setor no fim de cada ano; a linha é o total")
-            anual, nota = self.analise.composicao_anual(t, sel.ano_ini, sel.ano_fim)
-            partes = anual[COMPONENTES] * u.fator_nivel
-            partes.columns = [ROTULOS_CURTOS[c] for c in COMPONENTES]
-            cores = {ROTULOS_CURTOS[c]: tema.CORES_CATEGORIA[c] for c in COMPONENTES}
-            fig = self.visualizador.barras_empilhadas(partes, cores, linha=anual[TOTAL] * u.fator_nivel,
-                                                      rotulo_y=u.rotulo_nivel)
-            self._grafico(fig, "composicao_anual")
-            legenda = "Barras abaixo de zero: setor com posição credora líquida (reduz o total)."
-            st.caption(f"{legenda} {nota}" if nota else legenda)
+        self._linha([self._c_cascata_composicao(sel), self._c_rosca(sel)], [3, 2])
+        self._linha([self._c_composicao_anual(sel)])
 
     def aba_setores(self, sel: Selecao):
-        t, j, u = sel.tipo, sel.janela, sel.unidade
-        d = self.analise.destaque_setores(t, j)
-        (ganha, v_ganho), (perde, v_perda) = d["maior_ganho"], d["maior_perda"]
-        cartoes = [
-            tema.html_kpi("Maior contribuinte", d["lider"],
-                          f"{formatar_percentual(d['participacao'], 1)} do total · era "
-                          f"{formatar_percentual(d['participacao0'], 1)} em {formatar_mes(j.d0)}",
-                          tema.CORES_CATEGORIA[d["lider"]], pequeno=True),
-            tema.html_kpi("Mais ganhou participação", ganha, f"{formatar_pp(v_ganho)} no total · {j.texto}",
-                          tema.CORES_CATEGORIA[ganha], pequeno=True),
-            tema.html_kpi("Mais perdeu participação", perde, f"{formatar_pp(v_perda)} no total · {j.texto}",
-                          tema.CORES_CATEGORIA[perde], pequeno=True),
-        ]
+        t, j = sel.tipo, sel.janela
+        if not sel.em_foco:
+            d = self.analise.destaque_setores(t, j)
+            (ganha, v_ganho), (perde, v_perda) = d["maior_ganho"], d["maior_perda"]
+            cartoes = [
+                tema.html_kpi("Maior contribuinte", d["lider"],
+                              f"{formatar_percentual(d['participacao'], 1)} do total · era "
+                              f"{formatar_percentual(d['participacao0'], 1)} em {formatar_mes(j.d0)}",
+                              tema.CORES_CATEGORIA[d["lider"]], pequeno=True),
+                tema.html_kpi("Mais ganhou participação", ganha, f"{formatar_pp(v_ganho)} no total · {j.texto}",
+                              tema.CORES_CATEGORIA[ganha], pequeno=True),
+                tema.html_kpi("Mais perdeu participação", perde, f"{formatar_pp(v_perda)} no total · {j.texto}",
+                              tema.CORES_CATEGORIA[perde], pequeno=True),
+            ]
+        else:
+            p = self.analise.posicao_foco(t, j, sel.foco)
+            cor = tema.CORES_CATEGORIA[sel.foco]
+            if p["pct_da_variacao"] is None:
+                sub3 = "a dívida total variou pouco no período"
+            else:
+                sub3 = f"{formatar_percentual(p['pct_da_variacao'], 0)} da variação total ({formatar_variacao(t, p['variacao_total'])})"
+            cartoes = [
+                tema.html_kpi("Posição no ranking", f"{p['posicao']}º de {p['de']}",
+                              f"{formatar_percentual(p['participacao'], 1)} do total · {formatar_mes(j.d1)}",
+                              cor, pequeno=True),
+                tema.html_kpi("Variação da participação", formatar_pp(p["mudanca_pp"]),
+                              f"de {formatar_percentual(p['participacao0'], 1)} para "
+                              f"{formatar_percentual(p['participacao'], 1)} · {j.texto}", cor, pequeno=True),
+                tema.html_kpi("Contribuição à variação total", formatar_variacao(t, p["variacao"]), sub3,
+                              self._cor_variacao(p["variacao"]), pequeno=True),
+            ]
         for coluna, html in zip(st.columns(3), cartoes):
             coluna.markdown(html, unsafe_allow_html=True)
         st.write("")
 
-        esquerda, direita = st.columns(2)
-        with esquerda, self._cartao("ranking"):
-            self._titulo(f"Ranking de contribuição · {formatar_mes(j.d1)}",
-                         f"Barras em {u.rotulo_nivel}; rótulos mostram a participação no total")
-            detalhar = st.toggle("Detalhar empresas estatais", key="detalhar_estatais")
-            rk = self.analise.ranking(t, j, detalhar)
-            fig = self.visualizador.barras_horizontais(
-                [ROTULOS_CURTOS[c] for c in rk["categoria"]], rk["valor"] * u.fator_nivel,
-                [tema.CORES_CATEGORIA[c] for c in rk["categoria"]],
-                [formatar_percentual(p, 1) for p in rk["participacao"]], u.rotulo_nivel)
-            self._grafico(fig, "ranking")
-
-        with direita, self._cartao("participacao_tempo"):
-            self._titulo("Participação no total ao longo do tempo",
-                         "Quanto cada setor representa da dívida consolidada, mês a mês")
-            df = self.analise.participacoes(t, sel.ano_ini, sel.ano_fim)
-            fig = self.visualizador.plotar_grafico(
-                df, "data", "valor", None, "linha", cor="categoria", rotulo_y="% do total",
-                cores=tema.CORES_CATEGORIA, bandas=EVENTOS, altura=400)
-            self._grafico(fig, "participacao_tempo")
+        detalhar = st.toggle("Detalhar empresas estatais no ranking", value=(sel.foco == "Empresas Estatais"),
+                             key=f"detalhar_{sel.foco}")
+        self._linha([self._c_ranking(sel, detalhar), self._c_participacao(sel)])
 
     def aba_aumento(self, sel: Selecao):
-        t, j, u = sel.tipo, sel.janela, sel.unidade
-        total = self.analise.kpis_foco(t, TOTAL, j)
-        cagr = self.analise.crescimento_composto(j)
-        ext = self.analise.extremos(j)
+        t, j = sel.tipo, sel.janela
+        pib = self.analise.crescimento_composto(j, sel.serie)
+        c_pib = f"{formatar_percentual(pib['pib'], 1)} a.a." if pib else "n/d"
+        s_pib = "PIB nominal, 12 meses" if pib else self._motivo_sem_cagr(sel)
+        c_div = f"{formatar_percentual(pib['divida'], 1)} a.a." if pib else "n/d"
+        s_div = "crescimento composto, em R$" if pib else self._motivo_sem_cagr(sel)
 
-        if cagr:
-            c_div, c_pib = formatar_percentual(cagr["divida"], 1) + " a.a.", formatar_percentual(cagr["pib"], 1) + " a.a."
-            s_div, s_pib = "crescimento composto, em R$", "PIB nominal, 12 meses"
+        k = self.analise.kpis_foco(t, sel.serie, j)
+        if sel.em_foco:
+            p = self.analise.posicao_foco(t, j, sel.foco)
+            pct = p["pct_da_variacao"]
+            cartoes = [
+                tema.html_kpi(f"Variação · {sel.foco}", formatar_variacao(t, k["variacao"]), j.texto,
+                              self._cor_variacao(k["variacao"]), pequeno=True),
+                tema.html_kpi("Contribuição à variação total",
+                              formatar_percentual(pct, 0) if pct is not None else "n/d",
+                              f"total: {formatar_variacao(t, p['variacao_total'])}", tema.AZUL, pequeno=True),
+                tema.html_kpi(f"Crescimento médio · {sel.foco}", c_div, s_div, tema.LARANJA, pequeno=True),
+                tema.html_kpi("Crescimento médio do PIB", c_pib, s_pib, tema.CIANO, pequeno=True),
+            ]
         else:
-            c_div = c_pib = "n/d"
-            s_div = s_pib = "disponível para períodos de 12 meses ou mais"
-        if ext and ext["alta_12m"]:
-            alta, data_alta = ext["alta_12m"]
-            k4 = tema.html_kpi("Maior alta em 12 meses", formatar_pp(alta), f"até {formatar_mes(data_alta)}",
-                               tema.VERMELHO, pequeno=True)
-        else:
-            k4 = tema.html_kpi("Maior alta em 12 meses", "n/d", "período curto", tema.TEXTO_SUAVE, pequeno=True)
-        cartoes = [
-            tema.html_kpi("Variação da dívida total", formatar_variacao(t, total["variacao"]), j.texto,
-                          self._cor_variacao(total["variacao"]), pequeno=True),
-            tema.html_kpi("Crescimento médio da dívida", c_div, s_div, tema.LARANJA, pequeno=True),
-            tema.html_kpi("Crescimento médio do PIB", c_pib, s_pib, tema.CIANO, pequeno=True),
-            k4,
-        ]
+            ext = self.analise.extremos(j)
+            if ext and ext["alta_12m"]:
+                alta, data_alta = ext["alta_12m"]
+                k4 = tema.html_kpi("Maior alta em 12 meses", formatar_pp(alta), f"até {formatar_mes(data_alta)}",
+                                   tema.VERMELHO, pequeno=True)
+            else:
+                k4 = tema.html_kpi("Maior alta em 12 meses", "n/d", "período curto", tema.TEXTO_SUAVE, pequeno=True)
+            cartoes = [
+                tema.html_kpi("Variação da dívida total", formatar_variacao(t, k["variacao"]), j.texto,
+                              self._cor_variacao(k["variacao"]), pequeno=True),
+                tema.html_kpi("Crescimento médio da dívida", c_div, s_div, tema.LARANJA, pequeno=True),
+                tema.html_kpi("Crescimento médio do PIB", c_pib, s_pib, tema.CIANO, pequeno=True),
+                k4,
+            ]
         for coluna, html in zip(st.columns(4), cartoes):
             coluna.markdown(html, unsafe_allow_html=True)
         st.write("")
 
-        esquerda, direita = st.columns(2)
-        with esquerda, self._cartao("cascata_aumento"):
-            self._titulo("Quem puxou a variação", f"Contribuição de cada setor · {j.texto}")
-            c = self.analise.cascata_aumento(t, j)
-            textos = [formatar_variacao(t, v) if m == "relative" else formatar_medida(t, v)
-                      for v, m in zip(c["exibir"], c["medida"])]
-            fig = self.visualizador.cascata(c["rotulo"], c["valor"] * u.fator_nivel, c["medida"], textos,
-                                            u.rotulo_nivel, cor_alta=tema.VERMELHO, cor_baixa=tema.VERDE)
-            self._grafico(fig, "cascata_aumento")
+        self._linha([self._c_cascata_aumento(sel), self._c_crescimento(sel)])
+        self._linha([self._c_variacao_12m(sel), self._c_mapa_calor(sel)])
 
-        with direita, self._cartao("crescimento_12m"):
-            self._titulo("Dívida x PIB: crescimento em 12 meses",
-                         "Quando a dívida cresce mais que o PIB, a razão dívida/PIB sobe")
-            df = self.analise.crescimento_12m(sel.ano_ini, sel.ano_fim)
-            if df is None or df.empty:
-                st.info("Disponível quando as duas medidas (% do PIB e R$) estão nos dados.")
-            else:
-                fig = self.visualizador.plotar_grafico(
-                    df, "data", "valor", None, "linha", cor="serie", rotulo_y="% em 12 meses",
-                    cores={"Dívida líquida (R$)": tema.VERMELHO, "PIB nominal": tema.CIANO},
-                    bandas=EVENTOS, altura=370)
-                self._grafico(fig, "crescimento_12m")
-
-        esquerda, direita = st.columns(2)
-        with esquerda, self._cartao("variacao_12m"):
-            self._titulo("Variação em 12 meses da dívida total", "Vermelho: alta · Verde: queda")
-            serie = self.analise.variacao_12m(t, sel.ano_ini, sel.ano_fim)
-            if serie.empty:
-                st.info("Sem dados suficientes no período.")
-            else:
-                fig = self.visualizador.barras_sinal(serie.index, serie.values * u.fator_delta, u.rotulo_delta)
-                self._grafico(fig, "variacao_12m")
-
-        with direita, self._cartao("mapa_calor"):
-            self._titulo("Variação anual por setor", f"Fim de ano contra fim de ano ({u.rotulo_delta})")
-            matriz = self.analise.variacao_anual(t, sel.ano_ini, sel.ano_fim) * u.fator_delta
-            if matriz.empty:
-                st.info("Sem dados suficientes no período.")
-            else:
-                casas = 1 if t == TIPO_PORCENTAGEM else 0
-                textos = pd.DataFrame([[formatar_numero(v, casas, sinal=True) for v in linha]
-                                       for linha in matriz.values], index=matriz.index, columns=matriz.columns)
-                fig = self.visualizador.mapa_calor(matriz, textos, u.rotulo_delta)
-                self._grafico(fig, "mapa_calor")
+    @staticmethod
+    def _motivo_sem_cagr(sel: Selecao) -> str:
+        if sel.janela.meses < 12:
+            return "disponível para períodos de 12 meses ou mais"
+        return "não se aplica: série com valor zero ou negativo"
 
     def aba_dados(self, sel: Selecao):
         with self._cartao("tabela"):
             self._titulo("Dados do período", f"{ROTULOS_TIPO[sel.tipo]} · mais recentes primeiro")
             tabela = self.analise.periodo(sel.tipo, sel.ano_ini, sel.ano_fim).sort_index(ascending=False).copy()
+            # o dado em foco (e o total) vêm primeiro
+            ordem = list(dict.fromkeys([sel.serie, TOTAL] + list(tabela.columns)))
+            tabela = tabela[ordem]
             tabela.insert(0, "Data", tabela.index.date)
             tabela = tabela.reset_index(drop=True)
             formato = "%.2f" if sel.tipo == TIPO_PORCENTAGEM else "%.0f"
@@ -372,8 +533,9 @@ class Dashboard:
                      "e as mensagens no terminal.")
             return
 
-        self.render_cabecalho(self.analise.ultima_data())
+        # Os filtros ficam na barra lateral; precisam vir antes do cabeçalho, que mostra o foco.
         sel = self.filtros()
+        self.render_cabecalho(self.analise.ultima_data(), sel.foco if sel else None)
         if sel is None:
             st.warning("Não há dados nos anos selecionados.")
             return

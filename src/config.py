@@ -115,3 +115,15 @@ EVENTOS = [
     ("2014-04-01", "2016-12-01", "Recessão"),
     ("2020-03-01", "2020-12-01", "Pandemia"),
 ]
+
+
+# --- Dado em foco ---------------------------------------------------------
+# "Geral" usa todos os dados (o consolidado e todos os setores). Cada setor, quando
+# escolhido, mostra apenas uma parte dos dados: o painel inteiro passa a falar dele.
+GERAL = "Geral"
+FOCOS = [GERAL] + COMPONENTES
+
+
+def serie_do_foco(foco: str) -> str:
+    """Série usada nos indicadores: o total para 'Geral', ou o próprio setor."""
+    return SERIE_PRINCIPAL if foco == GERAL else foco

@@ -26,12 +26,27 @@ from functools import reduce
 import pandas as pd
 
 from analisador_dados import AnalisadorDados
-from config import (COMPONENTES, ESTATAIS_DETALHE, GOVERNOS, ROTULOS_CURTOS, SERIE_PRINCIPAL,
+from config import (COMPONENTES, ESTATAIS_DETALHE, GERAL, GOVERNOS, ROTULOS_CURTOS, SERIE_PRINCIPAL,
                     SERIES, TIPO_PORCENTAGEM, TIPO_REAL)
 from indicador import (formatar_medida, formatar_mes, formatar_percentual, formatar_pp,
                        formatar_variacao)
 
 TOTAL = SERIE_PRINCIPAL
+
+# Artigo e contração de cada setor, para frases corretas ("a dívida DO Banco Central").
+_ARTIGOS = {"Governo Federal": ("o", "do"), "Governos Estaduais": ("os", "dos"),
+            "Governos Municipais": ("os", "dos"), "Empresas Estatais": ("as", "das"),
+            "Banco Central": ("o", "do")}
+
+
+def _o(nome: str) -> str:
+    """'o Banco Central', 'os Governos Estaduais'..."""
+    return f"{_ARTIGOS[nome][0]} {nome}" if nome in _ARTIGOS else nome
+
+
+def _do(nome: str) -> str:
+    """'do Banco Central', 'dos Governos Estaduais'..."""
+    return f"{_ARTIGOS[nome][1]} {nome}" if nome in _ARTIGOS else f"de {nome}"
 COLUNAS = [TOTAL] + COMPONENTES + ESTATAIS_DETALHE
 
 
@@ -169,27 +184,43 @@ class AnaliseDivida:
         return df.sort_values("valor", ascending=False).reset_index(drop=True)
 
     def cascata_composicao(self, tipo: str, j: Janela) -> pd.DataFrame:
-        """Dados do gráfico em cascata (waterfall): cada setor soma (ou subtrai) até o total.
+        """Dados do gráfico em cascata: cada setor soma (ou subtrai) até o total.
 
-        Colunas: rotulo, valor (altura da barra), medida ('relative' | 'total'),
+        Colunas: rotulo, categoria, valor (altura da barra), medida ('relative' | 'total'),
         exibir (número a mostrar no rótulo da barra).
         """
         ordem = self.ranking(tipo, j)
         total = float(self.completa(tipo).loc[j.d1, TOTAL])
         return pd.DataFrame({
             "rotulo": [ROTULOS_CURTOS[c] for c in ordem["categoria"]] + [ROTULOS_CURTOS[TOTAL]],
+            "categoria": list(ordem["categoria"]) + [TOTAL],
             "valor": list(ordem["valor"]) + [0.0],  # o total é calculado pelo próprio gráfico
             "medida": ["relative"] * len(ordem) + ["total"],
             "exibir": list(ordem["valor"]) + [total],
         })
 
-    def divisao_governo_geral(self, tipo: str, j: Janela):
-        """Federal x estados x municípios dentro do governo geral. Devolve (df, soma)."""
+    def divisao_grupo(self, tipo: str, j: Janela, foco: str = GERAL):
+        """Divisão do grupo ao qual o dado em foco pertence, ou None se não se aplicar.
+
+        Geral e governos (federal, estaduais, municipais) -> divisão do governo geral.
+        Empresas estatais                                -> divisão por esfera (federal, estadual, municipal).
+        Banco Central                                    -> não pertence a nenhum grupo: None.
+        Também devolve None se alguma parte for zero ou negativa (fatias não fariam sentido).
+        """
+        if foco == "Banco Central":
+            return None
+        if foco == "Empresas Estatais":
+            grupo, titulo, curto, destaque = ESTATAIS_DETALHE, "Dentro das empresas estatais", "Estatais", None
+        else:
+            grupo, titulo, curto = GOVERNOS, "Dentro do governo geral", "Governo geral"
+            destaque = foco if foco in GOVERNOS else None
         linha = self.completa(tipo).loc[j.d1]
-        df = pd.DataFrame({"categoria": GOVERNOS, "valor": [float(linha[g]) for g in GOVERNOS]})
+        df = pd.DataFrame({"categoria": grupo, "valor": [float(linha[g]) for g in grupo]})
         soma = float(df["valor"].sum())
+        if soma <= 0 or (df["valor"] <= 0).any():
+            return None
         df["participacao"] = df["valor"] / soma * 100
-        return df, soma
+        return {"df": df, "soma": soma, "titulo": titulo, "curto": curto, "destaque": destaque}
 
     def composicao_anual(self, tipo: str, ano_ini: int, ano_fim: int):
         """Saldo de cada componente no fim de cada ano. Devolve (df, nota sobre ano parcial)."""
@@ -222,6 +253,24 @@ class AnaliseDivida:
                 "maior_ganho": (mudanca.idxmax(), float(mudanca.max())),
                 "maior_perda": (mudanca.idxmin(), float(mudanca.min()))}
 
+    def posicao_foco(self, tipo: str, j: Janela, foco: str) -> dict:
+        """Posição de um setor no ranking, mudança de participação e peso na variação total."""
+        tabela = self.completa(tipo)
+        l0, l1 = tabela.loc[j.d0], tabela.loc[j.d1]
+        t0, t1 = float(l0[TOTAL]), float(l1[TOTAL])
+        rk = self.ranking(tipo, j)
+        v0, v1 = float(l0[foco]), float(l1[foco])
+        delta_total = t1 - t0
+        relevante = abs(delta_total) > 0.001 * abs(t0)
+        return {
+            "posicao": int(rk.index[rk["categoria"] == foco][0]) + 1, "de": len(rk),
+            "lider": rk.iloc[0]["categoria"], "lider_participacao": float(rk.iloc[0]["participacao"]),
+            "participacao": v1 / t1 * 100, "participacao0": v0 / t0 * 100,
+            "mudanca_pp": v1 / t1 * 100 - v0 / t0 * 100,
+            "nivel0": v0, "nivel": v1, "variacao": v1 - v0, "variacao_total": delta_total,
+            "pct_da_variacao": (v1 - v0) / delta_total * 100 if relevante else None,
+        }
+
     # ============================================== 3. por que aumentou
     def cascata_aumento(self, tipo: str, j: Janela) -> pd.DataFrame:
         """Cascata da variação: dívida em d0 + contribuição de cada setor = dívida em d1."""
@@ -231,6 +280,7 @@ class AnaliseDivida:
         return pd.DataFrame({
             "rotulo": [f"Dívida {formatar_mes(j.d0)}"] + [ROTULOS_CURTOS[c] for c in deltas.index]
                       + [f"Dívida {formatar_mes(j.d1)}"],
+            "categoria": [TOTAL] + list(deltas.index) + [TOTAL],
             "valor": [float(t0[TOTAL])] + list(deltas) + [0.0],
             "medida": ["absolute"] + ["relative"] * len(deltas) + ["total"],
             "exibir": [float(t0[TOTAL])] + list(deltas) + [float(t1[TOTAL])],
@@ -245,9 +295,9 @@ class AnaliseDivida:
         delta.columns = [ROTULOS_CURTOS[c] for c in delta.columns]
         return delta
 
-    def variacao_12m(self, tipo: str, ano_ini: int, ano_fim: int) -> pd.Series:
-        """Variação da dívida total em 12 meses, mês a mês."""
-        serie = self.completa(tipo)[TOTAL].diff(12)
+    def variacao_12m(self, tipo: str, ano_ini: int, ano_fim: int, categoria: str = TOTAL) -> pd.Series:
+        """Variação da dívida de uma categoria em 12 meses, mês a mês."""
+        serie = self.completa(tipo)[categoria].diff(12)
         return serie[(serie.index.year >= ano_ini) & (serie.index.year <= ano_fim)].dropna()
 
     def pib_implicito(self):
@@ -262,42 +312,56 @@ class AnaliseDivida:
         real = self.completa(TIPO_REAL)[TOTAL]
         return real / (pct / 100)
 
-    def crescimento_12m(self, ano_ini: int, ano_fim: int):
-        """Crescimento em 12 meses da dívida (R$) e do PIB nominal, em % (formato longo)."""
+    def crescimento_12m(self, ano_ini: int, ano_fim: int, categoria: str = TOTAL):
+        """Crescimento em 12 meses da dívida (R$) e do PIB nominal, em % (formato longo).
+
+        Para um setor, inclui também a dívida total como referência. Devolve None quando
+        não é calculável: falta uma das medidas, ou o setor tem valor zero/negativo no
+        período (como o Banco Central), caso em que variação percentual não faz sentido.
+        """
         pib = self.pib_implicito()
         if pib is None:
             return None
-        divida = self.completa(TIPO_REAL)[TOTAL]
-        df = pd.DataFrame({
-            "Dívida líquida (R$)": (divida / divida.shift(12) - 1) * 100,
-            "PIB nominal": (pib / pib.shift(12) - 1) * 100,
-        })
+        real = self.completa(TIPO_REAL)
+        crescimento = lambda x: (x / x.shift(12) - 1) * 100
+        nome = "Dívida líquida (R$)" if categoria == TOTAL else f"{categoria} (R$)"
+        df = pd.DataFrame({nome: crescimento(real[categoria])})
+        if categoria != TOTAL:
+            df["Dívida total (R$)"] = crescimento(real[TOTAL])
+        df["PIB nominal"] = crescimento(pib)
         df = df[(df.index.year >= ano_ini) & (df.index.year <= ano_fim)].dropna()
+        if df.empty:
+            return None
+        usados = real[categoria][(real.index >= df.index.min() - pd.DateOffset(months=12))
+                                 & (real.index <= df.index.max())]
+        if (usados <= 0).any():
+            return None
         df.index.name = "data"
         return df.reset_index().melt(id_vars="data", var_name="serie", value_name="valor")
 
-    def crescimento_composto(self, j: Janela):
-        """Crescimento médio ANUAL composto da dívida e do PIB nominal na janela, em %.
+    def crescimento_composto(self, j: Janela, categoria: str = TOTAL):
+        """Crescimento médio ANUAL composto da dívida (de uma categoria) e do PIB nominal, em %.
 
         CAGR = (valor_final / valor_inicial) ** (12 / meses) - 1.
-        None se a janela tiver menos de 12 meses (anualizar um período curto engana).
+        None se a janela tiver menos de 12 meses (anualizar um período curto engana) ou se
+        a categoria tiver valor zero/negativo numa das pontas.
         """
         pib = self.pib_implicito()
         if pib is None or j.meses < 12:
             return None
-        divida = self.completa(TIPO_REAL)[TOTAL]
+        divida = self.completa(TIPO_REAL)[categoria]
         d0, d1, p0, p1 = divida[j.d0], divida[j.d1], pib[j.d0], pib[j.d1]
-        if d0 <= 0 or p0 <= 0:
+        if d0 <= 0 or d1 <= 0 or p0 <= 0:
             return None
         expoente = 12 / j.meses
         return {"divida": ((d1 / d0) ** expoente - 1) * 100,
                 "pib": ((p1 / p0) ** expoente - 1) * 100}
 
-    def extremos(self, j: Janela):
-        """Menor/maior nível e maior alta/queda em 12 meses da dívida total, em % do PIB."""
+    def extremos(self, j: Janela, categoria: str = TOTAL):
+        """Menor/maior nível e maior alta/queda em 12 meses de uma categoria, em % do PIB."""
         if TIPO_PORCENTAGEM not in self.tipos():
             return None
-        serie = self.completa(TIPO_PORCENTAGEM)[TOTAL]
+        serie = self.completa(TIPO_PORCENTAGEM)[categoria]
         no_periodo = serie[(serie.index.year >= j.ano_ini) & (serie.index.year <= j.ano_fim)]
         d12 = serie.diff(12)
         d12 = d12[(d12.index.year >= j.ano_ini) & (d12.index.year <= j.ano_fim)].dropna()
@@ -310,7 +374,7 @@ class AnaliseDivida:
         return resultado
 
     # ========================================================== textos
-    def respostas(self, tipo: str, j: Janela) -> list[dict]:
+    def _respostas_geral(self, tipo: str, j: Janela) -> list[dict]:
         """As três respostas curtas (pergunta, destaque, texto), calculadas dos dados."""
         tabela = self.completa(tipo)
         l0, l1 = tabela.loc[j.d0], tabela.loc[j.d1]
@@ -368,7 +432,7 @@ class AnaliseDivida:
               "destaque": formatar_variacao(tipo, delta), "texto": texto}
         return [q1, q2, q3]
 
-    def conclusoes(self, tipo: str, j: Janela) -> list[str]:
+    def _conclusoes_geral(self, tipo: str, j: Janela) -> list[str]:
         """Outras constatações do período (extremos, Banco Central, mudança de participação)."""
         itens = []
         ext = self.extremos(j)
@@ -393,4 +457,102 @@ class AnaliseDivida:
         itens.append(f"Entre {formatar_mes(j.d0)} e {formatar_mes(j.d1)}, quem mais ganhou participação no "
                      f"total foi {ganha} ({formatar_pp(v_ganho)}); quem mais perdeu foi {perde} "
                      f"({formatar_pp(v_perda)}).")
+        return itens
+
+    # ----------------------------------------------- textos conforme o dado em foco
+    def respostas(self, tipo: str, j: Janela, foco: str = GERAL) -> list[dict]:
+        """As três respostas curtas (pergunta, destaque, texto) para o dado em foco."""
+        if foco == GERAL:
+            return self._respostas_geral(tipo, j)
+        return self._respostas_setor(tipo, j, foco)
+
+    def conclusoes(self, tipo: str, j: Janela, foco: str = GERAL) -> list[str]:
+        """Constatações do período para o dado em foco."""
+        if foco == GERAL:
+            return self._conclusoes_geral(tipo, j)
+        return self._conclusoes_setor(tipo, j, foco)
+
+    def _respostas_setor(self, tipo: str, j: Janela, foco: str) -> list[dict]:
+        tabela = self.completa(tipo)
+        l1 = tabela.loc[j.d1]
+        t1 = float(l1[TOTAL])
+        p = self.posicao_foco(tipo, j, foco)
+        mes0, mes1 = formatar_mes(j.d0), formatar_mes(j.d1)
+        nivel = lambda v: formatar_medida(tipo, v) + (" do PIB" if tipo == TIPO_PORCENTAGEM else "")
+        v0, v1, part1 = p["nivel0"], p["nivel"], formatar_percentual(p["participacao"], 1)
+
+        # 1. De onde vem a dívida deste setor
+        if foco == "Banco Central" and v1 < 0:
+            texto = (f"Em {mes1}, o Banco Central tem dívida líquida de {nivel(v1)}: uma posição credora "
+                     f"líquida (sinal negativo). Ele não é fonte de dívida, e sim um abatimento: reduz a "
+                     f"dívida consolidada de {nivel(t1)}.")
+        else:
+            texto = (f"Em {mes1}, a dívida líquida {_do(foco)} é de {nivel(v1)}, o que corresponde a "
+                     f"{part1} da dívida consolidada ({nivel(t1)}).")
+            if foco in GOVERNOS:
+                governo = float(l1[GOVERNOS].sum())
+                texto += (f" Dentro do governo geral (federal, estados e municípios), representa "
+                          f"{formatar_percentual(v1 / governo * 100, 1)}.")
+            elif foco == "Empresas Estatais":
+                partes = ", ".join(f"{nome} {formatar_medida(tipo, float(l1[c]))}" for nome, c in
+                                   zip(("federais", "estaduais", "municipais"), ESTATAIS_DETALHE))
+                prefixo = "Por esfera (em % do PIB)" if tipo == TIPO_PORCENTAGEM else "Por esfera"
+                texto += f" {prefixo}: {partes}."
+        q1 = {"pergunta": f"De onde vem · {foco}", "destaque": f"{part1} do total", "texto": texto}
+
+        # 2. Quanto contribui
+        texto = (f"Em {mes1}, a posição {_do(foco)} entre os {p['de']} setores é a {p['posicao']}ª, com {part1} "
+                 f"do total. Em {mes0}, a participação era de {formatar_percentual(p['participacao0'], 1)} "
+                 f"({formatar_pp(p['mudanca_pp'])}). ")
+        texto += ("Este setor é o maior contribuinte." if p["lider"] == foco else
+                  f"O maior contribuinte é {_o(p['lider'])} "
+                  f"({formatar_percentual(p['lider_participacao'], 1)} do total).")
+        q2 = {"pergunta": f"Quanto contribui · {foco}", "destaque": f"{p['posicao']}º de {p['de']} setores",
+              "texto": texto}
+
+        # 3. Por que variou
+        delta, delta_total = p["variacao"], p["variacao_total"]
+        verbo = "subiu" if delta > 0 else "caiu" if delta < 0 else "ficou estável"
+        texto = (f"Entre {mes0} e {mes1}, a dívida {_do(foco)} {verbo}, de {formatar_medida(tipo, v0)} para "
+                 f"{nivel(v1)}.")
+        pct = p["pct_da_variacao"]
+        if pct is None:
+            texto += " A dívida total teve variação pequena no período."
+        elif pct >= 0:
+            texto += (f" Isso corresponde a {formatar_percentual(pct, 0)} da variação da dívida total "
+                      f"({formatar_variacao(tipo, delta_total)})")
+            texto += " (mais que o total, pois outros setores recuaram)." if pct > 100 else "."
+        else:
+            direcao = "subiu" if delta_total > 0 else "caiu"
+            texto += (f" Foi na direção oposta à da dívida total (que {direcao} "
+                      f"{formatar_variacao(tipo, delta_total)}).")
+        cagr = self.crescimento_composto(j, foco)
+        if cagr:
+            texto += (f" Em média, cresceu {formatar_percentual(cagr['divida'], 1)} ao ano, "
+                      f"contra {formatar_percentual(cagr['pib'], 1)} ao ano do PIB nominal.")
+        q3 = {"pergunta": f"Por que {'aumentou' if delta >= 0 else 'diminuiu'} · {foco}",
+              "destaque": formatar_variacao(tipo, delta), "texto": texto}
+        return [q1, q2, q3]
+
+    def _conclusoes_setor(self, tipo: str, j: Janela, foco: str) -> list[str]:
+        itens = []
+        ext = self.extremos(j, foco)
+        if ext:
+            (vmin, dmin), (vmax, dmax) = ext["minimo"], ext["maximo"]
+            itens.append(f"O menor nível da dívida {_do(foco)} foi em {formatar_mes(dmin)} "
+                         f"({formatar_percentual(vmin, 1)} do PIB) e o maior, em {formatar_mes(dmax)} "
+                         f"({formatar_percentual(vmax, 1)} do PIB).")
+            if ext["alta_12m"]:
+                (alta, d_alta), (queda, d_queda) = ext["alta_12m"], ext["queda_12m"]
+                itens.append(f"A maior alta em 12 meses {_do(foco)} foi de {formatar_pp(alta)} (até "
+                             f"{formatar_mes(d_alta)}) e a maior queda, de {formatar_pp(queda)} "
+                             f"(até {formatar_mes(d_queda)}).")
+            anual = self.variacao_anual(TIPO_PORCENTAGEM, j.ano_ini, j.ano_fim)[ROTULOS_CURTOS[foco]]
+            if not anual.empty:
+                itens.append(f"O ano de maior alta foi {anual.idxmax()} ({formatar_pp(float(anual.max()))}) "
+                             f"e o de maior queda, {anual.idxmin()} ({formatar_pp(float(anual.min()))}).")
+        p = self.posicao_foco(tipo, j, foco)
+        itens.append(f"A participação {_do(foco)} no total passou de {formatar_percentual(p['participacao0'], 1)} "
+                     f"em {formatar_mes(j.d0)} para {formatar_percentual(p['participacao'], 1)} em "
+                     f"{formatar_mes(j.d1)} ({formatar_pp(p['mudanca_pp'])}).")
         return itens

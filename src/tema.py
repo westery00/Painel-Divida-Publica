@@ -27,6 +27,7 @@ FONTE = "Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
 # Cor fixa de cada categoria: o mesmo setor tem a mesma cor em TODOS os gráficos.
 CORES_CATEGORIA = {
+    "Geral": BRANCO,
     "Setor Público Consolidado": BRANCO,
     "Governo Geral": "#B8C4FF",
     "Governo Federal": AZUL,
@@ -44,7 +45,6 @@ ESCALA_DIVERGENTE = [[0.0, VERDE], [0.5, FUNDO_CARD], [1.0, VERMELHO]]
 
 _CSS = Template("""
 <style>
-html, body, [class*="st-"], .stApp { font-family: $fonte; }
 .stApp { background: $fundo; color: $texto; }
 header[data-testid="stHeader"] { background: transparent; }
 #MainMenu, footer { visibility: hidden; }
@@ -64,6 +64,15 @@ div[class*="st-key-card_"] {
 .topo-titulo { font-size: 2rem; font-weight: 700; color: $branco; line-height: 1.15; }
 .topo-sub { color: $suave; font-size: 0.95rem; margin-top: 0.25rem; }
 .topo-data { color: $laranja; font-size: 0.95rem; font-weight: 600; }
+
+.chip { display: inline-block; background: $card2; border: 1px solid $borda; color: $branco;
+        border-radius: 999px; padding: 3px 12px; font-size: 0.82rem; font-weight: 600; margin-right: 10px; }
+
+/* Legenda própria (usada na rosca, para não depender da legenda do Plotly) */
+.legenda { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px 18px;
+           margin: 2px 0 8px 0; font-size: 0.85rem; color: $texto; }
+.legenda .ponto { display: inline-block; width: 11px; height: 11px; border-radius: 3px;
+                  margin-right: 6px; vertical-align: -1px; }
 
 /* KPIs */
 .kpi { background: linear-gradient(145deg, $card2, $card); border: 1px solid $borda;
@@ -95,8 +104,15 @@ div[class*="st-key-card_"] {
 
 
 def css() -> str:
-    return _CSS.substitute(fonte=FONTE, fundo=FUNDO, texto=TEXTO, card=FUNDO_CARD, card2=FUNDO_CARD_2,
+    return _CSS.substitute(fundo=FUNDO, texto=TEXTO, card=FUNDO_CARD, card2=FUNDO_CARD_2,
                            borda=BORDA, suave=TEXTO_SUAVE, branco=BRANCO, laranja=LARANJA)
+
+
+def esmaecer(cor_hex: str, alpha: float = 0.3) -> str:
+    """'#4C9AFF' -> 'rgba(76,154,255,0.3)': a mesma cor, mais apagada (para o que não está em foco)."""
+    h = cor_hex.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 def escapar_cifrao(texto) -> str:
@@ -106,11 +122,19 @@ def escapar_cifrao(texto) -> str:
 
 # Os blocos abaixo são escritos em UMA linha de propósito: no Markdown, linhas
 # indentadas ou em branco no meio do HTML fariam o Streamlit exibir o código na tela.
-def html_cabecalho(titulo: str, subtitulo: str, atualizado: str) -> str:
+def html_cabecalho(titulo: str, subtitulo: str, atualizado: str, foco: str = "") -> str:
+    chip = f'<span class="chip">Foco: {foco}</span>' if foco else ""
     return escapar_cifrao(
         f'<div class="topo"><div><div class="topo-titulo">{titulo}</div>'
         f'<div class="topo-sub">{subtitulo}</div></div>'
-        f'<div class="topo-data">{atualizado}</div></div>')
+        f'<div class="topo-data">{chip}{atualizado}</div></div>')
+
+
+def html_legenda(itens) -> str:
+    """Legenda em HTML: itens = [(rótulo, cor), ...]."""
+    pontos = "".join(f'<span><span class="ponto" style="background:{cor}"></span>{rotulo}</span>'
+                     for rotulo, cor in itens)
+    return f'<div class="legenda">{pontos}</div>'
 
 
 def html_kpi(titulo: str, valor: str, sub: str, cor_valor: str, cor_sub: str = TEXTO_SUAVE,
