@@ -20,11 +20,25 @@ ROTULOS_TIPO = {
     TIPO_PORCENTAGEM: "Porcentagem (% do PIB)",
     TIPO_REAL: "Valores em R$ (milhões)",
 }
-ROTULOS_EIXO_Y = {
-    TIPO_PORCENTAGEM: "% do PIB",
-    TIPO_REAL: "R$ milhões",
+
+
+@dataclass(frozen=True)
+class Unidade:
+    """Como exibir cada medida nos gráficos.
+
+    Os CSVs em R$ estão em milhões; para os gráficos ficarem legíveis, os
+    níveis (saldo da dívida) são mostrados em trilhões e as variações em bilhões.
+    """
+    rotulo_nivel: str
+    fator_nivel: float
+    rotulo_delta: str
+    fator_delta: float
+
+
+UNIDADES = {
+    TIPO_PORCENTAGEM: Unidade("% do PIB", 1.0, "p.p. do PIB", 1.0),
+    TIPO_REAL: Unidade("R$ trilhões", 1e-6, "R$ bilhões", 1e-3),
 }
-SUFIXO_REAL = "mi"
 
 
 @dataclass(frozen=True)
@@ -72,3 +86,32 @@ SERIES = {
         "divida_liquida_empresa_estatais_municipais_real.csv": Serie("Empresas Estatais Municipais"),
     },
 }
+
+
+# --- Estrutura da dívida usada nas análises ---------------------------------
+# Os cinco blocos de primeiro nível: somados, formam o Setor Público Consolidado.
+COMPONENTES = ["Governo Federal", "Governos Estaduais", "Governos Municipais",
+               "Empresas Estatais", "Banco Central"]
+ESTATAIS_DETALHE = ["Empresas Estatais Federais", "Empresas Estatais Estaduais",
+                    "Empresas Estatais Municipais"]
+GOVERNOS = ["Governo Federal", "Governos Estaduais", "Governos Municipais"]
+
+ROTULOS_CURTOS = {
+    "Setor Público Consolidado": "Total",
+    "Governo Federal": "Federal",
+    "Governos Estaduais": "Estados",
+    "Governos Municipais": "Municípios",
+    "Empresas Estatais": "Estatais",
+    "Banco Central": "Banco Central",
+    "Empresas Estatais Federais": "Estatais federais",
+    "Empresas Estatais Estaduais": "Estatais estaduais",
+    "Empresas Estatais Municipais": "Estatais municipais",
+}
+
+# Eventos de CONTEXTO desenhados como faixas nos gráficos de linha. Não fazem parte
+# dos CSVs: são marcos amplamente conhecidos, apenas para situar o leitor no tempo.
+EVENTOS = [
+    ("2008-09-01", "2009-06-01", "Crise global"),
+    ("2014-04-01", "2016-12-01", "Recessão"),
+    ("2020-03-01", "2020-12-01", "Pandemia"),
+]
