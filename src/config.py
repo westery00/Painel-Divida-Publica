@@ -127,3 +127,53 @@ FOCOS = [GERAL] + COMPONENTES
 def serie_do_foco(foco: str) -> str:
     """Série usada nos indicadores: o total para 'Geral', ou o próprio setor."""
     return SERIE_PRINCIPAL if foco == GERAL else foco
+
+
+# --- Atualização automática (Banco Central, SGS) ---------------------------------
+# Endereço oficial de download publicado no Portal de Dados Abertos do BCB; devolve o
+# histórico completo no mesmo formato dos CSVs do projeto ("data";"valor", vírgula decimal).
+URL_SGS = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=csv"
+
+# Códigos SGS CONFIRMADOS no portal (https://dadosabertos.bcb.gov.br). Os demais arquivos não têm
+# código aqui de propósito: o atualizador os DESCOBRE na primeira execução, comparando o que baixa
+# com o histórico que já está em dados/, e guarda o resultado em dados/fontes_sgs.json.
+CODIGOS_SGS = {
+    TIPO_PORCENTAGEM: {
+        "divida_liquida_setor_publico_consolidado.csv": 4513,
+        "divida_liquida_governo_federal.csv": 4504,
+        "divida_liquida_banco.csv": 4505,
+        "divida_liquida_governo_estaduais.csv": 4507,
+        "divida_liquida_geral.csv": 4536,
+        "divida_liquida_governo_municipal.csv": 4508,
+        "divida_liquida_empresas_estatais.csv": 4509,
+        "divida_liquida_empresas_estatais_federais.csv": 4510,
+        "divida_liquida_empresas_estatais_estaduais.csv": 4511,
+        "divida_liquida_empresas_estatais_municipais.csv": 4512,
+        "divida_bruta_governo_geral_apartir_2008.csv": 13762,
+        "divida_bruta_governo_geral_ate_2007.csv": 4537,
+        "selic_acumulada_no_mes.csv": 4390,
+    },
+    TIPO_REAL: {
+        "divida_liquida_consolidada_real.csv": 4478,
+        "divida_liquida_governos_federal_real.csv": 4469,
+        "divida_liquida_governos_estaduais_real.csv": 4472,
+        "divida_liquida_governos_municipais_real.csv": 4473,
+        "divida_liquida_banco_central_real.csv": 4470,
+        "divida_liquida_empresa_estatais_real.csv": 4474,
+        "divida_liquida_empresa_estatais_federais_real.csv": 4475,
+        "divida_liquida_empresa_estatais_estaduais_real.csv": 4476,
+        "divida_liquida_empresa_estatais_municipais_real.csv": 4477
+    },
+}
+
+# Códigos candidatos para a descoberta: as famílias de séries vizinhas às confirmadas
+# (% do PIB: 4503 a 4513; saldos em R$ milhões: 4478 a 4502).
+POOLS_SGS = {
+    TIPO_PORCENTAGEM: range(4503, 4537),
+    TIPO_REAL: range(4469, 4478),
+}
+
+# Diferença tolerada ao comparar o histórico baixado com o local. O BCB revisa valores passados
+# (ex.: o último mês), então a comparação não exige igualdade exata: vale o maior entre o piso
+# abaixo e 3% do valor. O piso está na unidade da medida (p.p. do PIB ou R$ milhões).
+PISO_TOLERANCIA_SGS = {TIPO_PORCENTAGEM: 0.05, TIPO_REAL: 100.0}

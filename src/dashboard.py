@@ -27,8 +27,9 @@ import streamlit as st
 
 import tema
 from analise_divida import COLUNAS, TOTAL, AnaliseDivida, Janela
+from atualizador_dados import STATUS_MANTIDA, RelatorioAtualizacao
 from config import (COMPONENTES, ESTATAIS_DETALHE, EVENTOS, FOCOS, GERAL, ROTULOS_CURTOS,
-                    ROTULOS_TIPO, TIPO_PORCENTAGEM, UNIDADES, serie_do_foco)
+                    ROTULOS_TIPO, TIPO_PORCENTAGEM, TIPO_REAL, UNIDADES, serie_do_foco)
 from indicador import (criar_indicador, formatar_medida, formatar_mes, formatar_numero,
                        formatar_percentual, formatar_pp, formatar_variacao)
 from visualizador import Visualizador
@@ -123,9 +124,12 @@ class Dashboard:
     ABAS = ["📊 Visão geral", "🧭 De onde vem", "🏛️ Qual setor contribui",
             "📈 Por que aumentou", "🗂️ Dados e metodologia"]
 
-    def __init__(self, analise: AnaliseDivida, visualizador: Visualizador):
+    def __init__(self, analise: AnaliseDivida, visualizador: Visualizador,
+                 relatorio: RelatorioAtualizacao | None = None, ao_atualizar=None):
         self.analise = analise
         self.visualizador = visualizador
+        self.relatorio = relatorio          # resultado da atualização feita na inicialização
+        self.ao_atualizar = ao_atualizar    # função chamada pelo botão "Atualizar dados agora"
 
     @staticmethod
     def configurar_pagina():
@@ -524,6 +528,31 @@ class Dashboard:
         with st.expander("Metodologia: como ler este painel e de onde vêm os números"):
             self._texto(METODOLOGIA)
 
+    # ===================================================== estado dos dados (lateral)
+    def render_status_dados(self):
+        """Mostra se os dados foram atualizados com o Banco Central e oferece atualizar na hora."""
+        r = self.relatorio
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**Dados**")
+        if r is None:
+            st.sidebar.caption("Fonte: Banco Central do Brasil (arquivos salvos no projeto).")
+        else:
+            texto = tema.escapar_cifrao(r.resumo())
+            if r.sem_conexao:
+                st.sidebar.warning(texto)
+            elif r.mantidas:
+                st.sidebar.warning(f"{texto} {len(r.mantidas)} série(s) mantida(s) como estavam.")
+            else:
+                st.sidebar.caption(f"🟢 {texto}")
+            with st.sidebar.expander("Detalhes da atualização"):
+                unidade = {TIPO_PORCENTAGEM: "% do PIB", TIPO_REAL: "R$"}
+                self._texto("\n".join(
+                    f"- {'⚠️' if s.status == STATUS_MANTIDA else '✅'} **{s.categoria}** ({unidade[s.tipo]}): {s.detalhe}"
+                    for s in r.series))
+        if self.ao_atualizar is not None:
+            st.sidebar.button("🔄 Atualizar dados agora", on_click=self.ao_atualizar,
+                              help="Baixa de novo as séries do Banco Central.")
+
     # ============================================================== orquestração
     def executar(self):
         """Monta a página completa."""
@@ -531,10 +560,12 @@ class Dashboard:
             self.render_cabecalho()
             st.error("Não foi possível carregar os dados. Verifique a pasta 'dados/' "
                      "e as mensagens no terminal.")
+            self.render_status_dados()
             return
 
         # Os filtros ficam na barra lateral; precisam vir antes do cabeçalho, que mostra o foco.
         sel = self.filtros()
+        self.render_status_dados()
         self.render_cabecalho(self.analise.ultima_data(), sel.foco if sel else None)
         if sel is None:
             st.warning("Não há dados nos anos selecionados.")

@@ -26,6 +26,21 @@ Na barra lateral, **Dado em foco** controla o painel inteiro:
 Gráficos que não fazem sentido para o setor escolhido simplesmente não aparecem (por exemplo, o crescimento
 percentual do Banco Central, cuja dívida é negativa); os vizinhos ocupam o espaço.
 
+## Atualização automática dos dados
+
+A cada inicialização, o painel baixa as séries do Banco Central e atualiza os CSVs de `dados/`
+(`src/atualizador_dados.py`). O endereço usado é o que o próprio portal publica:
+`https://api.bcb.gov.br/dados/serie/bcdata.sgs.<código>/dados?formato=csv`.
+
+- **Uma vez por inicialização.** O Streamlit reexecuta o código a cada clique, mas a atualização usa
+  `st.cache_resource`, que só roda de novo após reiniciar o servidor ou clicar em **Atualizar dados agora**
+  (barra lateral). A barra lateral mostra o resultado e, em "Detalhes da atualização", o estado de cada série.
+- **Nunca piora os dados.** Um arquivo só é substituído se o baixado tiver todas as datas do atual e os valores
+  coincidirem (com tolerância, pois o BCB revisa valores passados, por exemplo o último mês). Sem internet,
+  com erro ou com série suspeita, o arquivo local fica como está e o painel avisa.
+- **Sem rede?** `PAINEL_OFFLINE=1 streamlit run src/main.py` abre direto com os dados salvos.
+- Como os CSVs são regravados, o Git mostrará arquivos modificados quando o BCB publicar dados novos.
+
 ## Como executar
 
 ```bash
@@ -33,7 +48,7 @@ pip install -r requirements.txt
 streamlit run src/main.py
 ```
 
-Execute a partir da raiz do projeto. Para conferir os cálculos: `python tests/verificar_analise.py`.
+Execute a partir da raiz do projeto. Para conferir: `python tests/verificar_analise.py` (cálculos) e `python tests/verificar_atualizador.py` (atualização, sem internet).
 
 ## Estrutura
 
@@ -44,6 +59,7 @@ dados/
 src/
   config.py           caminhos, nome de cada série, unidades, estrutura da dívida, focos e eventos de contexto
   fonte_dados.py      FonteDados      lê os CSVs e devolve um único DataFrame
+  atualizador_dados.py AtualizadorDados baixa as séries do Banco Central, valida e atualiza os CSVs
   analisador_dados.py AnalisadorDados limpeza e ferramentas gerais (filtros, agrupamentos, indicadores)
   analise_divida.py   AnaliseDivida   responde às 3 perguntas, para o Geral e para cada setor
   indicador.py        formatadores pt-BR (R$ 9,38 tri, +39,5 p.p.) e classes Indicador
@@ -52,12 +68,13 @@ src/
   dashboard.py        Dashboard       monta as abas usando as classes acima
   main.py             ponto de entrada
 tests/
-  verificar_analise.py   confere os números da análise com os CSVs reais
+  verificar_analise.py      confere os números da análise com os CSVs reais
+  verificar_atualizador.py  testa a atualização com um Banco Central falso (sem internet)
 .streamlit/config.toml   tema escuro nativo do Streamlit
 ```
 
 ```
-FonteDados ──► AnalisadorDados ──► AnaliseDivida ──► Dashboard ──► Visualizador (gráficos)
+AtualizadorDados ──► FonteDados ──► AnalisadorDados ──► AnaliseDivida ──► Dashboard ──► Visualizador (gráficos)
  (CSV → df)    (limpa, filtra)     (3 perguntas)      (abas)   └──► tema, indicador (visual e formatos)
 ```
 
@@ -102,11 +119,15 @@ arquivos atuais: separador `;`, colunas `data` e `valor`, datas `dd/mm/aaaa` e d
 
 ## Dados que enriqueceriam o projeto
 
-Podem ser buscados no Portal de Dados Abertos do Banco Central (https://dadosabertos.bcb.gov.br):
+Todos no Portal de Dados Abertos do Banco Central (https://dadosabertos.bcb.gov.br): use a busca por título.
+Cada página tem o link de download; para baixar direto, use o endereço de CSV acima trocando `<código>`.
+"Confirmado" significa que o título e o código foram vistos no próprio portal.
 
-1. **Fatores condicionantes da dívida** (resultado primário, juros nominais, câmbio, efeito do PIB): responde
-   *por que* a dívida cresce em termos de fluxos, o que hoje só é possível mostrar por setor.
-2. **Dívida Bruta do Governo Geral (DBGG)**, a medida usada em comparações internacionais.
-3. **Composição da dívida federal** por indexador (Selic, prefixado, inflação, câmbio) e por detentor.
-4. **Dívida interna x externa.**
-5. **Taxa Selic e inflação (IPCA)**, para relacionar o custo da dívida ao seu crescimento.
+| Dado | Código / onde achar | Situação |
+|---|---|---|
+| Fatores condicionantes da DLSP (resultado primário, juros, câmbio, efeito do PIB) | busque "fatores condicionantes"; família NFSP, ex.: **5750** (NFSP sem desvalorização cambial, % PIB, fluxo em 12 meses, juros nominais, total) | 5750 confirmado; os demais fatores, a localizar |
+| Dívida Bruta do Governo Geral (DBGG) | **13762** (% do PIB, metodologia a partir de 2008) | confirmado |
+| Composição por indexador e detentor | Tesouro Nacional, "Relatório Mensal da Dívida Pública Federal" (tesourotransparente.gov.br) | fonte indicada; dataset exato a localizar |
+| Dívida interna x externa | no mesmo relatório do Tesouro (DPMFi e DPFe), ou séries da DLSP no BCB | a localizar |
+| Selic | **4390** (acumulada no mês) | confirmado |
+| IPCA | **433** (variação mensal; vem do IBGE) | não confirmado nesta pesquisa |
