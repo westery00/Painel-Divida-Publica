@@ -1,4 +1,4 @@
-# Trabalho-final — Painel da Dívida Pública Líquida
+# Painel da Dívida Pública Líquida
 
 Painel interativo (Python, Pandas, Plotly e Streamlit) que **destrincha a dívida pública líquida**
 por setor e responde a três perguntas:
