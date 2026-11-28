@@ -27,7 +27,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import (CODIGOS_SGS, PASTA_DADOS, PISO_TOLERANCIA_SGS, POOLS_SGS, SERIES, URL_SGS)
+from config import (CODIGOS_SGS, EXTRAS, LIMITE_IGUALDADE_SGS, MIN_FRACAO_EXATA, PASTA_DADOS, PASTA_EXTRA,
+                    PISO_TOLERANCIA_SGS, POOLS_SGS, SERIES, URL_SGS)
 from fonte_dados import FonteDados
 from indicador import formatar_mes
 
@@ -149,10 +150,18 @@ class AtualizadorDados:
         return resultado
 
     def _pre_baixar(self, codigos):
-        """Baixa vários códigos ao mesmo tempo, só para aquecer o cache."""
+        """Baixa vários códigos ao mesmo tempo, só para aquecer o cache.
+
+        Vai em lotes e DESISTE se um lote inteiro falhar por falta de conexão: numa rede que "pendura"
+        (cada tentativa espera o tempo limite), tentar todos os códigos faria o painel demorar minutos.
+        """
         pendentes = [c for c in dict.fromkeys(codigos) if c not in self._cache]
         with ThreadPoolExecutor(max_workers=self.simultaneos) as pool:
-            list(pool.map(lambda c: self._tentar(c), pendentes))
+            for inicio in range(0, len(pendentes), self.simultaneos):
+                lote = pendentes[inicio:inicio + self.simultaneos]
+                list(pool.map(self._tentar, lote))
+                if all(isinstance(self._cache[c], ErroDownload) and self._cache[c].rede for c in lote):
+                    return
 
     def _tentar(self, codigo):
         try:
@@ -162,8 +171,11 @@ class AtualizadorDados:
 
     # ========================================================== comparação
     @staticmethod
-    def _comparar(tipo: str, local: pd.DataFrame, remoto: pd.DataFrame):
-        """(compatível?, erro médio, motivo). Sem arquivo local, não há o que comparar: aceita."""
+    def _comparar(local: pd.DataFrame, remoto: pd.DataFrame, piso: float, relativa: float = 0.03):
+        """(compatível?, erro médio, motivo). Sem arquivo local, não há o que comparar: aceita.
+
+        Um ponto "coincide" se a diferença for no máximo max(piso, relativa x |valor local|).
+        """
         if local.empty:
             return True, 0.0, ""
         juntos = local.merge(remoto, on="data", how="left", suffixes=("_local", "_remoto"))
@@ -172,11 +184,19 @@ class AtualizadorDados:
             return False, np.inf, f"cobre só {cobertura:.0%} das datas do arquivo atual"
         juntos = juntos.dropna()
         diferenca = (juntos["valor_remoto"] - juntos["valor_local"]).abs()
-        tolerancia = np.maximum(PISO_TOLERANCIA_SGS[tipo], 0.03 * juntos["valor_local"].abs())
+        tolerancia = np.maximum(piso, relativa * juntos["valor_local"].abs())
         dentro = float((diferenca <= tolerancia).mean())
         if dentro < 0.95:
             return False, float(diferenca.mean()), f"só {dentro:.0%} dos valores coincidem com o arquivo atual"
         return True, float(diferenca.mean()), ""
+
+    @staticmethod
+    def _fracao_exata(local: pd.DataFrame, remoto: pd.DataFrame, limite: float) -> float:
+        """Fração das datas do arquivo local em que o valor baixado é idêntico (até o arredondamento)."""
+        juntos = local.merge(remoto, on="data", how="inner", suffixes=("_local", "_remoto"))
+        if juntos.empty:
+            return 0.0
+        return float(((juntos["valor_remoto"] - juntos["valor_local"]).abs() <= limite).mean())
 
     # =========================================================== descoberta
     def _descobrir(self, tipo: str, pendentes: dict, ocupados: set) -> dict:
@@ -195,7 +215,8 @@ class AtualizadorDados:
             if local.empty:
                 continue
             validos = sorted((erro, c) for c, rem in remotos.items()
-                             for ok, erro, _ in [self._comparar(tipo, local, rem)] if ok)
+                             for ok, erro, _ in [self._comparar(local, rem, PISO_TOLERANCIA_SGS[tipo])]
+                             if ok and self._fracao_exata(local, rem, LIMITE_IGUALDADE_SGS[tipo]) >= MIN_FRACAO_EXATA)
             if validos:
                 candidatos[arquivo] = validos
 
@@ -227,6 +248,7 @@ class AtualizadorDados:
     @staticmethod
     def _gravar(caminho: Path, texto: str):
         """Gravação atômica: escreve num arquivo temporário e troca, para nunca deixar um CSV pela metade."""
+        caminho.parent.mkdir(parents=True, exist_ok=True)
         temporario = caminho.with_suffix(caminho.suffix + ".tmp")
         temporario.write_text(texto, encoding="utf-8")
         os.replace(temporario, caminho)
@@ -236,26 +258,31 @@ class AtualizadorDados:
         """Atualiza todos os CSVs possíveis e devolve o relatório. Nunca levanta exceção de rede."""
         relatorio = RelatorioAtualizacao(quando=datetime.now())
         mapa_salvo = self._ler_mapa()
-        mapa = {t: {**mapa_salvo.get(t, {}), **CODIGOS_SGS.get(t, {})} for t in SERIES}  # os confirmados prevalecem
+        mapa = {t: {**mapa_salvo.get(t, {}), **CODIGOS_SGS.get(t, {})} for t in SERIES}  # os do config prevalecem
         locais = {(t, a): self._fonte.carregar_arquivo(self.pasta / t / a) for t in SERIES for a in SERIES[t]}
+        caminho_extra = lambda e: self.pasta / PASTA_EXTRA / e.arquivo
 
-        self._pre_baixar(c for t in SERIES for c in mapa[t].values())
+        self._pre_baixar([c for t in SERIES for c in mapa[t].values()] + [e.codigo_sgs for e in EXTRAS.values()])
         if self._cache and all(isinstance(v, ErroDownload) and v.rede for v in self._cache.values()):
             # Nenhum download funcionou por falta de conexão: não adianta tentar a descoberta.
             relatorio.sem_conexao = True
-            relatorio.series = [ResultadoSerie(t, a, serie.categoria, STATUS_MANTIDA,
-                                               "sem conexão com o Banco Central", mapa[t].get(a))
-                                for t in SERIES for a, serie in SERIES[t].items()]
+            relatorio.series = (
+                [ResultadoSerie(t, a, serie.categoria, STATUS_MANTIDA, "sem conexão com o Banco Central", mapa[t].get(a))
+                 for t in SERIES for a, serie in SERIES[t].items()]
+                + [ResultadoSerie("extra", e.arquivo, e.nome, STATUS_MANTIDA, "sem conexão com o Banco Central", e.codigo_sgs)
+                   for e in EXTRAS.values()])
             return relatorio
         resultados, pendentes = {}, {t: {} for t in SERIES}
 
         for tipo in SERIES:
+            piso = PISO_TOLERANCIA_SGS[tipo]
             for arquivo, serie in SERIES[tipo].items():
                 codigo = mapa[tipo].get(arquivo)
                 motivo = "código ainda não descoberto"
                 if codigo is not None:
                     try:
-                        resultados[(tipo, arquivo)] = self._aplicar(tipo, arquivo, codigo, locais[(tipo, arquivo)])
+                        resultados[(tipo, arquivo)] = self._aplicar(
+                            self.pasta / tipo / arquivo, codigo, locais[(tipo, arquivo)], piso)
                         continue
                     except ErroDownload as erro:
                         motivo = str(erro)
@@ -265,11 +292,12 @@ class AtualizadorDados:
                     mapa[tipo].pop(arquivo, None)  # código que não bate: será redescoberto
                 pendentes[tipo][arquivo] = (locais[(tipo, arquivo)], motivo)
 
+        codigos_extras = {e.codigo_sgs for e in EXTRAS.values()}
         for tipo in SERIES:
             if not pendentes[tipo]:
                 continue
             achados = self._descobrir(tipo, {a: l for a, (l, _) in pendentes[tipo].items()},
-                                      ocupados=set(mapa[tipo].values()))
+                                      ocupados=set(mapa[tipo].values()) | codigos_extras)
             for arquivo, (local, motivo) in pendentes[tipo].items():
                 codigo = achados.get(arquivo)
                 if codigo is None:
@@ -278,7 +306,9 @@ class AtualizadorDados:
                                               f"inequivocamente ao arquivo atual", None)
                     continue
                 try:
-                    resultados[(tipo, arquivo)] = self._aplicar(tipo, arquivo, codigo, local)
+                    status, cod, detalhe, ultima = self._aplicar(
+                        self.pasta / tipo / arquivo, codigo, local, PISO_TOLERANCIA_SGS[tipo])
+                    resultados[(tipo, arquivo)] = (status, cod, f"{detalhe} · código {codigo} descoberto automaticamente", ultima)
                     mapa[tipo][arquivo] = codigo
                 except ErroDownload as erro:
                     resultados[(tipo, arquivo)] = (STATUS_MANTIDA, codigo, str(erro), None)
@@ -291,16 +321,33 @@ class AtualizadorDados:
             for arquivo, serie in SERIES[tipo].items():
                 status, codigo, detalhe, ultima = resultados[(tipo, arquivo)]
                 relatorio.series.append(ResultadoSerie(tipo, arquivo, serie.categoria, status, detalhe, codigo, ultima))
+
+        # Séries extras: código fixo, sem descoberta, e SEMPRE conferidas contra o arquivo local.
+        for extra in EXTRAS.values():
+            try:
+                status, codigo, detalhe, ultima = self._aplicar(
+                    caminho_extra(extra), extra.codigo_sgs, self._fonte.carregar_arquivo(caminho_extra(extra)),
+                    extra.piso, extra.relativa, exigir_local=True)
+            except ErroDownload as erro:
+                status, codigo, detalhe, ultima = STATUS_MANTIDA, extra.codigo_sgs, str(erro), None
+            relatorio.series.append(ResultadoSerie("extra", extra.arquivo, extra.nome, status, detalhe, codigo, ultima))
         return relatorio
 
-    def _aplicar(self, tipo: str, arquivo: str, codigo: int, local: pd.DataFrame):
-        """Baixa, valida contra o arquivo local e grava se houver novidade. Levanta ErroDownload se não servir."""
+    def _aplicar(self, caminho: Path, codigo: int, local: pd.DataFrame, piso: float, relativa: float = 0.03,
+                 exigir_local: bool = False):
+        """Baixa, valida contra o arquivo local e grava se houver novidade. Levanta ErroDownload se não servir.
+
+        exigir_local: sem arquivo local para comparar, recusa (usado nas séries extras, cujo código pode
+        não estar confirmado: sem histórico para conferir, qualquer série "parecida" poderia entrar).
+        """
         texto, remoto = self._obter(codigo)
-        compativel, _, motivo = self._comparar(tipo, local, remoto)
+        if exigir_local and local.empty:
+            raise ErroDownload(f"série {codigo} não pôde ser conferida: não há arquivo local para comparar")
+        compativel, _, motivo = self._comparar(local, remoto, piso, relativa)
         if not compativel:
             raise ErroDownload(f"série {codigo} descartada: {motivo}")
         ultima = remoto["data"].max()
         if not local.empty and local.equals(remoto):
             return STATUS_EM_DIA, codigo, f"em dia até {formatar_mes(ultima)}", ultima
-        self._gravar(self.pasta / tipo / arquivo, texto)
+        self._gravar(caminho, texto)
         return STATUS_ATUALIZADA, codigo, f"atualizada até {formatar_mes(ultima)}", ultima

@@ -27,6 +27,7 @@ import streamlit as st
 
 import tema
 from analise_divida import COLUNAS, TOTAL, AnaliseDivida, Janela
+from analise_extras import IPCA12, JURO_REAL, PIB12, SELIC12, AnaliseExtras
 from atualizador_dados import STATUS_MANTIDA, RelatorioAtualizacao
 from config import (COMPONENTES, ESTATAIS_DETALHE, EVENTOS, FOCOS, GERAL, ROTULOS_CURTOS,
                     ROTULOS_TIPO, TIPO_PORCENTAGEM, TIPO_REAL, UNIDADES, serie_do_foco)
@@ -35,7 +36,7 @@ from indicador import (criar_indicador, formatar_medida, formatar_mes, formatar_
 from visualizador import Visualizador
 
 METODOLOGIA = """
-**Fonte dos dados.** Banco Central do Brasil (Portal de Dados Abertos, dadosabertos.bcb.gov.br).
+**Fonte dos dados.** Banco Central do Brasil (Portal de Dados Abertos, dadosabertos.bcb.gov.br): dívida líquida, dívida bruta e Selic. IBGE: IPCA.
 
 **Dado em foco.** *Geral* usa todos os dados: o consolidado e todos os setores. Cada setor escolhido mostra
 apenas uma parte dos dados, e todo o painel passa a falar dele: os indicadores, os textos e os gráficos,
@@ -67,6 +68,18 @@ cerca de R$ 5,78 tri em dez/2014 e R$ 7,39 tri em dez/2019), o que confirma as u
 `(final ÷ inicial) ^ (12 ÷ meses) − 1`. Compara-se o ritmo da dívida com o do PIB nominal: quando a dívida
 cresce mais rápido que o PIB, a razão dívida/PIB sobe. Só é calculado para períodos de 12 meses ou mais e
 para séries positivas.
+
+**Juros e inflação.** Taxas mensais se *compõem*: 12 meses de 1% ao mês valem 12,68%, e não 12%. O *juro real
+ex-post* é (1 + Selic) ÷ (1 + IPCA) − 1, com os dois acumulados em 12 meses. A *dívida em termos reais* corrige o saldo
+de cada mês pelo IPCA para os preços do último mês, e separa inflação de crescimento de verdade: (1 + nominal) = (1 + inflação)
+× (1 + real). A comparação *Selic × PIB nominal* usa a Selic só como aproximação do custo da dívida: quando ela supera o
+crescimento do PIB nominal, a dívida tende a crescer em proporção do PIB, salvo superávit primário. O mês corrente da
+Selic, ainda incompleto, não entra: todas as séries terminam no último mês da dívida líquida.
+
+**Dívida bruta.** O painel mostra a dívida bruta do governo geral por duas metodologias do Banco Central, ao lado da dívida
+líquida do mesmo conjunto (federal, estados e municípios). A bruta não desconta os ativos; a líquida desconta. As duas
+metodologias da bruta medem de formas diferentes e não são trechos de uma mesma série; consulte a nota do Banco Central
+na página de cada série para o detalhe da diferença.
 
 **Como ler os gráficos.**
 **Cascata:** cada barra soma (ou subtrai) à anterior até chegar ao total. **Mapa de calor:** cada célula é a
@@ -122,14 +135,16 @@ class Cartao:
 
 class Dashboard:
     ABAS = ["📊 Visão geral", "🧭 De onde vem", "🏛️ Qual setor contribui",
-            "📈 Por que aumentou", "🗂️ Dados e metodologia"]
+            "📈 Por que aumentou", "💸 Juros e inflação", "🗂️ Dados e metodologia"]
 
     def __init__(self, analise: AnaliseDivida, visualizador: Visualizador,
-                 relatorio: RelatorioAtualizacao | None = None, ao_atualizar=None):
+                 relatorio: RelatorioAtualizacao | None = None, ao_atualizar=None,
+                 extras: AnaliseExtras | None = None):
         self.analise = analise
         self.visualizador = visualizador
         self.relatorio = relatorio          # resultado da atualização feita na inicialização
         self.ao_atualizar = ao_atualizar    # função chamada pelo botão "Atualizar dados agora"
+        self.extras = extras                # IPCA, Selic e dívida bruta (opcional)
 
     @staticmethod
     def configurar_pagina():
@@ -387,10 +402,78 @@ class Dashboard:
                       f"Fim de ano contra fim de ano ({u.rotulo_delta}) · contorno branco: {ROTULOS_CURTOS[sel.serie]}"
                       if sel.em_foco else f"Fim de ano contra fim de ano ({u.rotulo_delta})", fig)
 
+    # ============================================ cartões: dívida bruta, juros e inflação
+    def _c_bruta_liquida(self, sel: Selecao):
+        if self.extras is None:
+            return None
+        df = self.extras.bruta_liquida(sel.ano_ini, sel.ano_fim)
+        if df is None:
+            return None
+        cores = {"Bruta (metodologia atual)": tema.LARANJA,
+                 "Bruta (metodologia até 2007)": tema.esmaecer(tema.LARANJA, 0.55),
+                 "Líquida (governo geral)": tema.CORES_CATEGORIA["Governo Geral"]}
+        fig = self.visualizador.plotar_grafico(df, "data", "valor", None, "linha", cor="serie", rotulo_y="% do PIB",
+                                               cores=cores, bandas=EVENTOS, altura=380)
+        return Cartao("bruta_liquida", "Dívida bruta × líquida do governo geral",
+                      "Federal, estados e municípios · % do PIB · duas metodologias para a bruta", fig,
+                      nota=self.extras.texto_bruta_liquida(sel.janela) or "")
+
+    def _c_juros_inflacao(self, sel: Selecao):
+        df = self.extras.juros_inflacao(sel.ano_ini, sel.ano_fim)
+        if df is None:
+            return None
+        fig = self.visualizador.plotar_grafico(
+            self.extras.longo(df), "data", "valor", None, "linha", cor="serie", rotulo_y="% em 12 meses",
+            cores={SELIC12: tema.LARANJA, IPCA12: tema.CIANO, JURO_REAL: tema.ROXO}, bandas=EVENTOS, altura=370)
+        return Cartao("juros_inflacao", "Selic, inflação e juro real", "Acumulados em 12 meses", fig)
+
+    def _c_selic_pib(self, sel: Selecao):
+        df = self.extras.selic_pib(sel.ano_ini, sel.ano_fim)
+        if df is None:
+            return None
+        fig = self.visualizador.plotar_grafico(
+            self.extras.longo(df), "data", "valor", None, "linha", cor="serie", rotulo_y="% em 12 meses",
+            cores={SELIC12: tema.LARANJA, PIB12: tema.VERDE}, bandas=EVENTOS, altura=370)
+        return Cartao("selic_pib", "Selic × crescimento do PIB nominal",
+                      "Acumulados em 12 meses · a Selic é só uma aproximação do custo médio da dívida", fig)
+
+    def _quem(self, sel: Selecao) -> str:
+        return "Dívida total" if not sel.em_foco else f"Dívida · {sel.foco}"
+
+    def _c_divida_real(self, sel: Selecao):
+        df = self.extras.divida_real(sel.serie, sel.janela)
+        if df is None:
+            return None
+        df["valor"] = df["valor"] * UNIDADES[TIPO_REAL].fator_nivel
+        cores = {nome: (tema.LARANJA if nome == "Nominal" else tema.CIANO) for nome in df["serie"].unique()}
+        fig = self.visualizador.plotar_grafico(df, "data", "valor", None, "linha", cor="serie",
+                                               rotulo_y=UNIDADES[TIPO_REAL].rotulo_nivel, cores=cores,
+                                               bandas=EVENTOS, altura=370)
+        return Cartao("divida_real", f"{self._quem(sel)}: valores nominais × reais",
+                      f"Real = corrigida pelo IPCA para os preços de {formatar_mes(sel.janela.d1)}", fig)
+
+    def _c_crescimento_real(self, sel: Selecao):
+        c = self.extras.crescimento_real(sel.janela, sel.serie)
+        if c is None:
+            return None
+        anual = c["anualizado"] is not None
+        valores = c["anualizado"] if anual else c["acumulado"]
+        df = pd.DataFrame({"item": ["Nominal", "Inflação (IPCA)", "Real"],
+                           "valor": [valores["nominal"], valores["inflacao"], valores["real"]]})
+        fig = self.visualizador.plotar_grafico(
+            df, "item", "valor", None, "barra", cor="item", rotulo_y="% ao ano" if anual else "% no período",
+            cores={"Nominal": tema.LARANJA, "Inflação (IPCA)": tema.CIANO, "Real": tema.ROXO}, altura=340)
+        return Cartao("crescimento_real", "Crescimento da dívida: nominal, inflação e real",
+                      f"{sel.janela.texto} · (1 + nominal) = (1 + inflação) × (1 + real)", fig)
+
     # ===================================================================== abas
     def aba_visao_geral(self, sel: Selecao):
         t, j, u = sel.tipo, sel.janela, sel.unidade
         respostas = self.analise.respostas(t, j, sel.foco)
+        if self.extras is not None:  # soma à resposta 'por que aumentou' o crescimento descontada a inflação
+            frase = self.extras.frase_real(j, sel.serie)
+            if frase:
+                respostas[2]["texto"] += " " + frase
         variacao = self.analise.kpis_foco(t, sel.serie, j)["variacao"]
         cores = [tema.AZUL, tema.LARANJA, self._cor_variacao(variacao)]
         for coluna, r, cor in zip(st.columns(3), respostas, cores):
@@ -423,6 +506,7 @@ class Dashboard:
     def aba_origem(self, sel: Selecao):
         self._linha([self._c_cascata_composicao(sel), self._c_rosca(sel)], [3, 2])
         self._linha([self._c_composicao_anual(sel)])
+        self._linha([self._c_bruta_liquida(sel)])
 
     def aba_setores(self, sel: Selecao):
         t, j = sel.tipo, sel.janela
@@ -513,6 +597,32 @@ class Dashboard:
             return "disponível para períodos de 12 meses ou mais"
         return "não se aplica: série com valor zero ou negativo"
 
+    def aba_juros(self, sel: Selecao):
+        ex = self.extras
+        if ex is None or not ex.tem("ipca", "selic"):
+            st.info("Esta aba precisa do IPCA e da Selic em dados/extra/ (veja o README).")
+            return
+        j = sel.janela
+        k = ex.kpis_juros(j)
+        pct = lambda v: formatar_percentual(v, 1) if v is not None else "n/d"
+        diferenca = k["selic_menos_pib"]
+        cartoes = [
+            tema.html_kpi("Selic em 12 meses", pct(k["selic"]), f"acumulada até {formatar_mes(j.d1)}", tema.LARANJA, pequeno=True),
+            tema.html_kpi("IPCA em 12 meses", pct(k["ipca"]), f"acumulado até {formatar_mes(j.d1)}", tema.CIANO, pequeno=True),
+            tema.html_kpi("Juro real (ex-post)", pct(k["juro_real"]), "Selic e IPCA acumulados, compostos", tema.ROXO, pequeno=True),
+            tema.html_kpi("Selic menos PIB nominal", formatar_pp(diferenca) if diferenca is not None else "n/d",
+                          "ambos em 12 meses", self._cor_variacao(diferenca) if diferenca is not None else tema.TEXTO_SUAVE,
+                          pequeno=True),
+        ]
+        for coluna, html in zip(st.columns(4), cartoes):
+            coluna.markdown(html, unsafe_allow_html=True)
+        st.write("")
+        self._linha([self._c_juros_inflacao(sel), self._c_selic_pib(sel)])
+        self._linha([self._c_divida_real(sel), self._c_crescimento_real(sel)], [3, 2])
+        with self._cartao("constatacoes_juros"):
+            self._titulo("Constatações do período", f"Sobre: {sel.foco}")
+            self._texto("\n".join(f"- {c}" for c in ex.constatacoes_juros(j, sel.serie, sel.foco)))
+
     def aba_dados(self, sel: Selecao):
         with self._cartao("tabela"):
             self._titulo("Dados do período", f"{ROTULOS_TIPO[sel.tipo]} · mais recentes primeiro")
@@ -545,7 +655,7 @@ class Dashboard:
             else:
                 st.sidebar.caption(f"🟢 {texto}")
             with st.sidebar.expander("Detalhes da atualização"):
-                unidade = {TIPO_PORCENTAGEM: "% do PIB", TIPO_REAL: "R$"}
+                unidade = {TIPO_PORCENTAGEM: "% do PIB", TIPO_REAL: "R$", "extra": "dado extra"}
                 self._texto("\n".join(
                     f"- {'⚠️' if s.status == STATUS_MANTIDA else '✅'} **{s.categoria}** ({unidade[s.tipo]}): {s.detalhe}"
                     for s in r.series))
@@ -574,6 +684,6 @@ class Dashboard:
         self.render_kpis(sel)
         abas = st.tabs(self.ABAS)
         for aba, metodo in zip(abas, (self.aba_visao_geral, self.aba_origem, self.aba_setores,
-                                      self.aba_aumento, self.aba_dados)):
+                                      self.aba_aumento, self.aba_juros, self.aba_dados)):
             with aba:
                 metodo(sel)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import PASTA_DADOS, SERIES
+from config import EXTRAS, PASTA_DADOS, PASTA_EXTRA, SERIES
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +86,15 @@ class FonteDados:
         if not partes:
             return self._vazio()
         return pd.concat(partes, ignore_index=True)
+
+    def carregar_extra(self, chave: str) -> pd.DataFrame:
+        """Uma série extra (IPCA, Selic, dívida bruta): [data, valor]. Vazio se o arquivo não existir."""
+        return self.carregar_arquivo(self.__pasta_dados / PASTA_EXTRA / EXTRAS[chave].arquivo)
+
+    def carregar_extras(self) -> dict:
+        """Todas as séries extras disponíveis: {chave: DataFrame}. As que faltam ficam de fora."""
+        carregadas = {chave: self.carregar_extra(chave) for chave in EXTRAS}
+        return {chave: df for chave, df in carregadas.items() if not df.empty}
 
     def _vazio(self) -> pd.DataFrame:
         return pd.DataFrame(columns=self.COLUNAS)

@@ -134,9 +134,10 @@ def serie_do_foco(foco: str) -> str:
 # histórico completo no mesmo formato dos CSVs do projeto ("data";"valor", vírgula decimal).
 URL_SGS = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=csv"
 
-# Códigos SGS CONFIRMADOS no portal (https://dadosabertos.bcb.gov.br). Os demais arquivos não têm
-# código aqui de propósito: o atualizador os DESCOBRE na primeira execução, comparando o que baixa
-# com o histórico que já está em dados/, e guarda o resultado em dados/fontes_sgs.json.
+# Códigos SGS das séries de dívida líquida por setor (um por arquivo). Se algum código estiver errado,
+# o atualizador percebe (os dados baixados não batem com o histórico do arquivo), mantém o arquivo como
+# está e tenta DESCOBRIR o código certo entre os candidatos de POOLS_SGS; o achado vai para
+# dados/fontes_sgs.json.
 CODIGOS_SGS = {
     TIPO_PORCENTAGEM: {
         "divida_liquida_setor_publico_consolidado.csv": 4513,
@@ -149,9 +150,6 @@ CODIGOS_SGS = {
         "divida_liquida_empresas_estatais_federais.csv": 4510,
         "divida_liquida_empresas_estatais_estaduais.csv": 4511,
         "divida_liquida_empresas_estatais_municipais.csv": 4512,
-        "divida_bruta_governo_geral_apartir_2008.csv": 13762,
-        "divida_bruta_governo_geral_ate_2007.csv": 4537,
-        "selic_acumulada_no_mes.csv": 4390,
     },
     TIPO_REAL: {
         "divida_liquida_consolidada_real.csv": 4478,
@@ -166,8 +164,8 @@ CODIGOS_SGS = {
     },
 }
 
-# Códigos candidatos para a descoberta: as famílias de séries vizinhas às confirmadas
-# (% do PIB: 4503 a 4513; saldos em R$ milhões: 4478 a 4502).
+# Candidatos para a descoberta (só usados se um código acima falhar na validação):
+# % do PIB: 4503 a 4536; saldos em R$ milhões: 4469 a 4477.
 POOLS_SGS = {
     TIPO_PORCENTAGEM: range(4503, 4537),
     TIPO_REAL: range(4469, 4478),
@@ -177,3 +175,44 @@ POOLS_SGS = {
 # (ex.: o último mês), então a comparação não exige igualdade exata: vale o maior entre o piso
 # abaixo e 3% do valor. O piso está na unidade da medida (p.p. do PIB ou R$ milhões).
 PISO_TOLERANCIA_SGS = {TIPO_PORCENTAGEM: 0.05, TIPO_REAL: 100.0}
+
+# A DESCOBERTA de códigos (que escolhe séries sem ninguém conferir) é mais rigorosa que a validação de
+# um código já fixado: só aceita um candidato se pelo menos MIN_FRACAO_EXATA dos pontos forem IDÊNTICOS
+# ao arquivo atual (diferença de até LIMITE_IGUALDADE_SGS, que é o arredondamento de duas casas). A série
+# verdadeira é praticamente idêntica ao histórico; uma série "parecida" (soma com outra, por exemplo) não é.
+LIMITE_IGUALDADE_SGS = {TIPO_PORCENTAGEM: 0.0051, TIPO_REAL: 0.51}
+MIN_FRACAO_EXATA = 0.80
+
+
+# --- Séries EXTRAS: inflação, juros e dívida bruta ---------------------------------
+PASTA_EXTRA = "extra"   # dados/extra/
+
+
+@dataclass(frozen=True)
+class Extra:
+    """Uma série fora da dívida líquida por setor.
+
+    codigo_sgs:   código no SGS do Banco Central (o atualizador baixa e valida contra o arquivo local).
+    piso/relativa: tolerância ao comparar o baixado com o arquivo local (veja PISO_TOLERANCIA_SGS).
+                  Séries que o BCB/IBGE não revisam (IPCA, Selic) usam tolerância mínima, para que
+                  uma série parecida (outro índice de preços, por exemplo) nunca seja aceita no lugar.
+    """
+    arquivo: str
+    nome: str
+    unidade: str
+    codigo_sgs: int
+    piso: float
+    relativa: float
+
+
+EXTRAS = {
+    # IPCA do IBGE. O arquivo original (IPCA.csv) está no formato largo do IBGE; o painel lê a versão
+    # convertida (python src/conversor_ibge.py). O código 433 NÃO foi confirmado no portal: a validação
+    # estrita contra o histórico do IBGE protege o arquivo caso o código esteja errado.
+    "ipca": Extra("ipca_variacao_mensal.csv", "IPCA (variação mensal)", "% a.m.", 433, 0.011, 0.0),
+    "selic": Extra("selic_acumulada_no_mes.csv", "Selic acumulada no mês", "% a.m.", 4390, 0.011, 0.0),
+    "dbgg_atual": Extra("divida_bruta_governo_geral_apartir_2008.csv",
+                        "Dívida bruta do governo geral (metodologia a partir de 2008)", "% do PIB", 13762, 0.05, 0.03),
+    "dbgg_antiga": Extra("divida_bruta_governo_geral_ate_2007.csv",
+                         "Dívida bruta do governo geral (metodologia até 2007)", "% do PIB", 4537, 0.05, 0.03),
+}

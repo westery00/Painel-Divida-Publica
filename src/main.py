@@ -7,6 +7,7 @@ import os
 import streamlit as st
 
 from analise_divida import AnaliseDivida
+from analise_extras import AnaliseExtras
 from analisador_dados import AnalisadorDados
 from atualizador_dados import AtualizadorDados, RelatorioAtualizacao
 from dashboard import Dashboard
@@ -41,8 +42,11 @@ def main(atualizador=None):
     # 3. Análise do tema: responde às três perguntas (AnaliseDivida)
     analise = AnaliseDivida(analisador)
 
-    # 4. Painel (Dashboard): apresenta a análise usando o Visualizador
-    Dashboard(analise, Visualizador(), relatorio, ao_atualizar=atualizar_dados.clear).executar()
+    # 4. Séries extras: IPCA, Selic e dívida bruta (a aba 'Juros e inflação' e a dívida bruta x líquida)
+    extras = AnaliseExtras(analise, FonteDados().carregar_extras())
+
+    # 5. Painel (Dashboard): apresenta a análise usando o Visualizador
+    Dashboard(analise, Visualizador(), relatorio, ao_atualizar=atualizar_dados.clear, extras=extras).executar()
 
 
 if __name__ == "__main__":
